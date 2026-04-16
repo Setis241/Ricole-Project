@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CHROMATYPE — Timing Editor</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: monospace;
+  background: #0a0a0a;
+  color: #fff;
+  overflow: hidden;
+}
+
+.header {
+  background: #111;
+  padding: 12px 16px;
+  border-bottom: 1px solid #222;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.header h1 {
+  font-size: 14px;
+  color: #e8ff00;
+  letter-spacing: 2px;
+}
+.header a {
+  color: #666;
+  text-decoration: none;
+  font-size: 11px;
+  margin-left: auto;
+}
+.header a:hover { color: #e8ff00; }
+
+.main {
+  display: flex;
+  height: calc(100vh - 50px);
+}
+
+/* SIDEBAR */
+.sidebar {
+  width: 240px;
+  background: #0d0d0d;
+  border-right: 1px solid #1a1a1a;
+  padding: 16px;
+  overflow-y: auto;
+}
+.section {
+  margin-bottom: 20px;
+}
+.section label {
+  display: block;
+  font-size: 9px;
+  text-transform: uppercase;
+  color: #666;
+  margin-bottom: 8px;
+}
+.file-drop {
+  padding: 16px;
+  background: #1a1a1a;
+  border: 2px dashed #333;
+  border-radius: 4px;
+  color: #999;
+  font-size: 11px;
+  cursor: pointer;
+  text-align: center;
+}
+.file-drop:hover {
+  border-color: #e8ff00;
+  color: #e8ff00;
+}
+.file-drop.loaded {
+  border-color: #e8ff00;
+  border-style: solid;
+  color: #e8ff00;
+}
+textarea {
+  width: 100%;
+  padding: 10px;
+  background: #0a0a0a;
+  border: 1px solid #222;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 12px;
+  font-family: monospace;
+  resize: vertical;
+  min-height: 120px;
+  margin-bottom: 8px;
+}
+textarea:focus {
+  outline: none;
+  border-color: #e8ff00;
+}
+.btn {
+  width: 100%;
+  padding: 10px;
+  background: #e8ff00;
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 11px;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.btn:hover { background: #fff; }
+.btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.progress {
+  text-align: center;
+  font-size: 13px;
+  color: #666;
+  padding: 12px;
+  background: #0a0a0a;
+  border-radius: 4px;
+}
+.progress span {
+  color: #e8ff00;
+  font-weight: 700;
+  font-size: 16px;
+}
+.hotkeys {
+  font-size: 10px;
+  color: #666;
+  line-height: 1.8;
+}
+.hotkeys kbd {
+  background: #1a1a1a;
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: #e8ff00;
+  margin-right: 6px;
+}
+
+/* CENTER */
+.center {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: #000;
+}
+.transport {
+  background: #0d0d0d;
+  padding: 14px 16px;
+  border-bottom: 1px solid #1a1a1a;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.play-btn {
+  padding: 10px 24px;
+  background: #e8ff00;
+  color: #000;
+  border: none;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.play-btn:hover { background: #fff; }
+.play-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.seek-slider {
+  flex: 1;
+  height: 6px;
+  background: #1a1a1a;
+  border-radius: 3px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.seek-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  background: #e8ff00;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.seek-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  background: #e8ff00;
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+.time {
+  font-family: monospace;
+  font-size: 13px;
+  color: #e8ff00;
+  min-width: 65px;
+}
+#totalTime { color: #666; }
+.speed-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-left: 1px solid #222;
+  border-right: 1px solid #222;
+}
+.speed-label {
+  font-size: 9px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.speed-slider {
+  width: 80px;
+  height: 4px;
+  background: #1a1a1a;
+  border-radius: 2px;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  cursor: pointer;
+}
+.speed-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  background: #e8ff00;
+  border-radius: 50%;
+  cursor: pointer;
+}
+.speed-slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  background: #e8ff00;
+  border-radius: 50%;
+  cursor: pointer;
+  border: none;
+}
+.speed-value {
+  font-family: monospace;
+  font-size: 11px;
+  color: #e8ff00;
+  min-width: 40px;
+  text-align: right;
+}
+.undo-btn {
+  padding: 8px 16px;
+  background: #1a1a1a;
+  color: #999;
+  border: 1px solid #222;
+  border-radius: 4px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.undo-btn:hover {
+  color: #e8ff00;
+  border-color: #e8ff00;
+}
+
+.lyrics-display {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 24px 20px;
+  text-align: center;
+  overflow-y: auto;
+}
+.line-counter {
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  margin-bottom: 16px;
+}
+.current-line {
+  font-size: 42px;
+  font-weight: 700;
+  color: #e8ff00;
+  line-height: 1.3;
+  margin-bottom: 14px;
+  max-width: 900px;
+}
+.next-line {
+  font-size: 18px;
+  color: #444;
+  max-width: 700px;
+}
+.mark-hint {
+  margin-top: 24px;
+  padding: 14px 28px;
+  background: rgba(232, 255, 0, 0.1);
+  border: 2px solid #e8ff00;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #e8ff00;
+  display: none;
+}
+.mark-hint.visible { display: block; }
+
+/* RESULTS */
+.results {
+  width: 300px;
+  background: #0d0d0d;
+  border-left: 1px solid #1a1a1a;
+  display: flex;
+  flex-direction: column;
+}
+.results-header {
+  padding: 14px 16px;
+  border-bottom: 1px solid #1a1a1a;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.results-header h3 {
+  font-size: 10px;
+  text-transform: uppercase;
+  color: #666;
+}
+.results-count {
+  font-size: 11px;
+  color: #e8ff00;
+  font-weight: 700;
+  background: rgba(232, 255, 0, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+.view-toggle {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  color: #e8ff00;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+  margin-left: 8px;
+  transition: all 0.2s;
+}
+.view-toggle:hover {
+  background: #222;
+  border-color: #e8ff00;
+  transform: scale(1.05);
+}
+.results-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+.result-item {
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  padding: 10px;
+  margin-bottom: 6px;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.result-item:hover {
+  background: #111;
+  border-color: #333;
+}
+.result-item.current {
+  border-color: #e8ff00;
+  background: rgba(232, 255, 0, 0.05);
+}
+.result-item.clickable {
+  cursor: pointer;
+}
+.result-time {
+  font-family: monospace;
+  font-size: 12px;
+  color: #000;
+  background: #e8ff00;
+  border: 1px solid #e8ff00;
+  min-width: 70px;
+  text-align: center;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.result-time:hover {
+  background: #fff;
+  border-color: #fff;
+}
+.result-time-readonly {
+  font-family: monospace;
+  font-size: 12px;
+  color: #e8ff00;
+  background: rgba(232, 255, 0, 0.1);
+  border: 1px solid rgba(232, 255, 0, 0.3);
+  min-width: 70px;
+  text-align: center;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.result-time-readonly.dimmed {
+  opacity: 0.25;
+  color: #666;
+  background: transparent;
+  border-color: #222;
+}
+.result-time-input {
+  font-family: monospace;
+  font-size: 11px;
+  color: #e8ff00;
+  background: #000;
+  border: 1px solid #e8ff00;
+  padding: 3px 6px;
+  border-radius: 3px;
+  width: 60px;
+}
+.result-text {
+  flex: 1;
+  font-size: 11px;
+  color: #ccc;
+  line-height: 1.5;
+}
+.result-delete {
+  background: none;
+  border: none;
+  color: #666;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0;
+  width: 24px;
+  height: 24px;
+}
+.result-delete:hover {
+  color: #ff4444;
+}
+.export-buttons {
+  padding: 14px 16px;
+  border-top: 1px solid #1a1a1a;
+  display: flex;
+  gap: 8px;
+}
+.export-btn {
+  flex: 1;
+  padding: 10px;
+  background: #1a1a1a;
+  color: #e8ff00;
+  border: 1px solid #222;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+.export-btn:hover {
+  background: #e8ff00;
+  color: #000;
+}
+
+/* MOBILE */
+@media (max-width: 768px) {
+  .main { flex-direction: column; }
+  .sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid #1a1a1a;
+    max-height: 40vh;
+    order: 3;
+  }
+  .center { order: 1; }
+  .results {
+    width: 100%;
+    border-left: none;
+    border-top: 1px solid #1a1a1a;
+    max-height: 35vh;
+    order: 2;
+  }
+  .current-line { font-size: 28px; }
+  .next-line { font-size: 14px; }
+}
+
+::-webkit-scrollbar { width: 8px; }
+::-webkit-scrollbar-track { background: #0a0a0a; }
+::-webkit-scrollbar-thumb { background: #333; border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>CHROMATYPE</h1>
+  <a href="index.html">← Back</a>
+  <a href="frames.html" style="color:#666;text-decoration:none;font-size:11px;">Рамки</a>
+</div>
+
+<div class="main">
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+    <div class="section">
+      <label>Audio</label>
+      <div class="file-drop" id="audioDropZone">
+        🎵 Drop audio or click
+      </div>
+      <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,.aac" hidden />
+    </div>
+
+    <div class="section">
+      <label>Lyrics</label>
+      <textarea id="lyricsInput" placeholder="Paste lyrics here...&#10;One line per lyric"></textarea>
+      <button class="btn" id="loadLyricsBtn" disabled>Load</button>
+    </div>
+
+    <div class="section">
+      <div class="progress">
+        <span id="progressCurrent">0</span> / <span id="progressTotal">0</span>
+      </div>
+    </div>
+
+    <div class="section hotkeys">
+      <div><kbd>SPACE</kbd> Mark line</div>
+      <div><kbd>CTRL+Z</kbd> Undo</div>
+      <div><kbd>← →</kbd> Seek ±2s</div>
+      <div><kbd>[ ]</kbd> Speed ±0.1x</div>
+    </div>
+  </div>
+
+  <!-- CENTER -->
+  <div class="center">
+    <div class="transport">
+      <button class="play-btn" id="playBtn" disabled>▶ PLAY</button>
+      <input type="range" class="seek-slider" id="seekSlider" min="0" max="1000" value="0" />
+      <span class="time" id="currentTime">00:00.00</span>
+      <span>/</span>
+      <span class="time" id="totalTime">00:00.00</span>
+      <div class="speed-control">
+        <label class="speed-label">SPEED</label>
+        <input type="range" class="speed-slider" id="speedSlider" min="25" max="100" value="100" step="5" />
+        <span class="speed-value" id="speedValue">1.0x</span>
+      </div>
+      <button class="undo-btn" id="undoBtn">↩ UNDO</button>
+    </div>
+
+    <div class="lyrics-display">
+      <div class="line-counter" id="lineCounter">LOAD LYRICS TO START</div>
+      <div class="current-line" id="currentLine">—</div>
+      <div class="next-line" id="nextLine"></div>
+      <div class="mark-hint" id="markHint">Press SPACE to mark this line</div>
+    </div>
+  </div>
+
+  <!-- RESULTS -->
+  <div class="results">
+    <div class="results-header">
+      <h3>Timed Lines</h3>
+      <div>
+        <button class="view-toggle" id="viewToggle">⏱️</button>
+        <span class="results-count" id="resultsCount">0</span>
+      </div>
+    </div>
+    <div class="results-list" id="resultsList"></div>
+    <div class="export-buttons">
+      <button class="export-btn" id="copyBtn">COPY LRC</button>
+      <button class="export-btn" id="downloadBtn">⬇ DOWNLOAD</button>
+    </div>
+  </div>
+</div>
+
+<script src="LRCParser.js"></script>
+<script src="TimingEditor.js"></script>
+
+</body>
+</html>

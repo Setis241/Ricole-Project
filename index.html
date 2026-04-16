@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>CHROMATYPE — Кинетическая типографика</title>
+<link rel="stylesheet" href="css/main.css?v=3" />
+</head>
+<body>
+
+<header>
+  <h1>CHROMATYPE</h1>
+  <nav>
+    <a href="index.html" class="active">Главная</a>
+    <a href="timing-editor.html">Редактор</a>
+    <a href="frames.html">Рамки</a>
+  </nav>
+  <div class="header-right">
+    <div class="status-pill">
+      <span class="status-dot" id="statusDot"></span>
+      <span id="statusText">ГОТОВ</span>
+    </div>
+    <span id="timeDisplay" style="font-family:var(--mono);font-size:11px;color:var(--accent);min-width:80px;text-align:right;">00:00.000</span>
+  </div>
+</header>
+
+<div class="workspace">
+
+  <!-- ══ ЛЕВАЯ ПАНЕЛЬ ══ -->
+  <div class="panel">
+    <div class="panel-label">// НАСТРОЙКИ</div>
+    <div class="section-nav">
+      <button class="nav-btn active" data-section="media">МЕДИА</button>
+      <button class="nav-btn" data-section="text">ТЕКСТ</button>
+      <button class="nav-btn" data-section="style">СТИЛЬ</button>
+      <button class="nav-btn" data-section="camera">КАМЕРА</button>
+      <button class="nav-btn" data-section="export">ЭКСПОРТ</button>
+    </div>
+    <div class="panel-scroll">
+
+      <!-- МЕДИА -->
+      <div class="section-group" data-group="media">
+        
+        <div class="section">
+          <label>Аудио</label>
+          <div class="file-drop" id="audioDrop">
+            <span class="drop-icon">🎵</span>
+            <span class="drop-name">MP3 / WAV / OGG</span>
+            <input type="file" id="audioFile" accept=".mp3,.wav,.ogg,.aac" />
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Фон <span id="bgTypeBadge" style="color:var(--accent);font-size:8px;"></span></label>
+          <div class="file-drop" id="bgDrop">
+            <span class="drop-icon">🖼</span>
+            <span class="drop-name">Картинка / Видео</span>
+            <input type="file" id="bgFile" accept="image/*,video/*" />
+          </div>
+          <div style="margin-top:10px;">
+            <div class="toggle-row">
+              <span>Кен Бёрнс</span>
+              <div class="toggle on" id="fx-kenBurns"></div>
+            </div>
+            <div class="toggle-row">
+              <span>Цветокоррекция</span>
+              <div class="toggle off" id="fx-colorGrade"></div>
+            </div>
+            <div class="toggle-row">
+              <span>Виньетка</span>
+              <div class="toggle on" id="fx-vignette"></div>
+            </div>
+            <div class="toggle-row">
+              <span>Хроматическая аберрация</span>
+              <div class="toggle" id="fx-chromatic"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Объекты</label>
+          <button class="btn btn-primary btn-full" id="overlayManagerBtn">🖼 УПРАВЛЕНИЕ ОБЪЕКТАМИ</button>
+        </div>
+      </div>
+
+      <!-- ТЕКСТ -->
+      <div class="section-group" data-group="text">
+        
+        <div class="section">
+          <label>Контент</label>
+          <input type="file" id="lrcFile" accept=".lrc,.txt" style="display:none;" />
+          <div class="btn-group" style="margin-bottom:8px;">
+            <button class="btn btn-ghost" id="lrcLoadBtn">📄 Файл</button>
+            <button class="btn btn-ghost" id="lrcClearFileBtn">✕</button>
+          </div>
+          <textarea id="lyricsInput" rows="4" placeholder="[00:01.00] Первая строка&#10;[00:03.50] Вторая строка"></textarea>
+          <div class="btn-group" style="margin-top:8px;">
+            <button class="btn btn-ghost" id="parseLyricsBtn">Загрузить</button>
+            <button class="btn btn-ghost" id="clearLyricsBtn">Очистить</button>
+          </div>
+          <button class="btn btn-primary btn-full" id="fxEditorBtn" style="margin-top:8px;">✦ FX EDITOR</button>
+        </div>
+      </div>
+
+      <!-- СТИЛЬ -->
+      <div class="section-group" data-group="style">
+        
+        <div class="section">
+          <label>Шрифт</label>
+          <select id="fontSelect">
+            <option value="'Bebas Neue', cursive">Bebas Neue</option>
+            <option value="'Oswald', sans-serif">Oswald</option>
+            <option value="'Montserrat', sans-serif">Montserrat</option>
+            <option value="'Russo One', sans-serif">Russo One</option>
+            <option value="'Exo 2', sans-serif">Exo 2</option>
+            <option value="'Raleway', sans-serif">Raleway</option>
+            <option value="'Rubik', sans-serif">Rubik</option>
+            <option value="'Jura', sans-serif">Jura</option>
+            <option value="'Play', sans-serif">Play</option>
+            <option value="'Comfortaa', cursive">Comfortaa</option>
+            <option value="'Space Mono', monospace">Space Mono</option>
+            <option value="'Impact', sans-serif">Impact</option>
+          </select>
+        </div>
+
+        <div class="section">
+          <label>Размер</label>
+          <div class="range-row">
+            <input type="range" id="fontSize" min="24" max="220" value="96" />
+            <span class="range-val" id="fontSizeVal">96</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Позиция</label>
+          <select id="textPosition">
+            <option value="center">Центр</option>
+            <option value="top">Верх</option>
+            <option value="bottom">Низ</option>
+          </select>
+        </div>
+
+        <div class="section">
+          <label>Цвет</label>
+          <input type="color" id="textColor" value="#ffffff" style="width:100%;height:36px;cursor:pointer;" />
+        </div>
+
+        <div class="section">
+          <label>Анимация</label>
+          <select id="animMode">
+            <option value="pulse">Пульс</option>
+            <option value="bounce">Прыжок</option>
+            <option value="shake">Тряска</option>
+            <option value="zoom">Зум</option>
+            <option value="spin">Вращение</option>
+            <option value="cinematic">Кино</option>
+            <optgroup label="─── Кинетика (per-word) ───">
+              <option value="flash">⚡ Flash — удар по центру</option>
+              <option value="cascade">🪜 Cascade — лесенка</option>
+              <option value="snap">🧲 Snap — тетрис-склейка</option>
+              <option value="scatter">💥 Scatter — хаос</option>
+              <option value="path">〜 Path — волна</option>
+            </optgroup>
+          </select>
+        </div>
+
+        <div class="section">
+          <label>Глобальная рамка</label>
+          <div id="globalBoxList" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:4px;">
+            <!-- кнопки генерируются в App.js -->
+          </div>
+          <div style="font-size:8px;color:var(--muted);letter-spacing:1px;margin-top:4px;">
+            Применяется ко всем строкам без собственной рамки
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Перевод (>>>)</label>
+          <div class="toggle-row" style="margin-bottom:10px;">
+            <span>Показывать</span>
+            <div class="toggle on" id="translationToggle"></div>
+          </div>
+          <div class="range-row" style="margin-bottom:8px;">
+            <input type="range" id="translationSize" min="15" max="75" value="40" />
+            <span class="range-val" id="translationSizeVal">40%</span>
+          </div>
+          <input type="color" id="translationColor" value="#999999"
+            style="width:100%;height:32px;cursor:pointer;border:1px solid var(--border);background:transparent;" />
+        </div>
+      </div>
+
+      <!-- КАМЕРА -->
+      <div class="section-group" data-group="camera">
+        
+        <div class="section">
+          <label>Статичный зум</label>
+          <button class="btn btn-ghost btn-full" id="camZoomToggle" style="margin-bottom:8px;">Вкл / Выкл</button>
+          <div class="range-row">
+            <input type="range" id="camZoomVal" min="1.0" max="3.0" step="0.05" value="1.3" />
+            <span class="range-val" id="camZoomValLabel">1.30</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Музыкальный зум</label>
+          <div class="btn-group" style="margin-bottom:8px;">
+            <button class="btn btn-ghost" id="camMusicZoomToggle">Вкл / Выкл</button>
+            <button class="btn btn-ghost" id="camMusicZoomDir">→ вовнутрь</button>
+          </div>
+          <div class="range-row">
+            <input type="range" id="camMusicZoomAmt" min="0.05" max="1.5" step="0.05" value="0.4" />
+            <span class="range-val" id="camMusicZoomAmtLabel">0.40</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Прокрутка X</label>
+          <div class="btn-group" style="margin-bottom:8px;">
+            <button class="btn btn-ghost" id="camScrollLeft">← Влево</button>
+            <button class="btn btn-ghost" id="camScrollRight">→ Вправо</button>
+          </div>
+          <div class="range-row">
+            <input type="range" id="camScrollXSpeed" min="0.005" max="0.5" step="0.005" value="0.05" />
+            <span class="range-val" id="camScrollXSpeedLabel">0.05</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Прокрутка Y</label>
+          <div class="btn-group" style="margin-bottom:8px;">
+            <button class="btn btn-ghost" id="camScrollUp">↑ Вверх</button>
+            <button class="btn btn-ghost" id="camScrollDown">↓ Вниз</button>
+          </div>
+          <div class="range-row">
+            <input type="range" id="camScrollYSpeed" min="0.005" max="0.5" step="0.005" value="0.05" />
+            <span class="range-val" id="camScrollYSpeedLabel">0.05</span>
+          </div>
+        </div>
+
+        <div class="section">
+          <label>Управление</label>
+          <div class="btn-group">
+            <button class="btn btn-ghost" id="camStopAll">⏹ Стоп</button>
+            <button class="btn btn-ghost" id="camResetPos">↺ Сброс</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ЭКСПОРТ -->
+      <div class="section-group" data-group="export">
+        
+        <div class="section">
+          <label>Разрешение</label>
+          <select id="resolution">
+            <option value="1920x1080">1920 × 1080</option>
+            <option value="1280x720">1280 × 720</option>
+            <option value="1080x1080">1080 × 1080</option>
+            <option value="1080x1920">1080 × 1920</option>
+          </select>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- ══ ЦЕНТР: ХОЛСТ ══ -->
+  <div class="canvas-area">
+    <div class="canvas-wrap">
+      <canvas id="mainCanvas" width="1280" height="720"></canvas>
+    </div>
+
+    <!-- VU + Спектр + Управление -->
+    <div class="controls-row">
+      <div class="vu-group">
+        <div class="vu-bars">
+          <div class="vu-bar" data-band="bass" style="height:36px"><div class="vu-fill" id="vuBass"></div></div>
+          <div class="vu-bar" data-band="mid"  style="height:36px"><div class="vu-fill" id="vuMid" ></div></div>
+          <div class="vu-bar" data-band="high" style="height:36px"><div class="vu-fill" id="vuHigh"></div></div>
+        </div>
+        <span class="vu-label">Б · С · В</span>
+      </div>
+      
+      <canvas id="spectrumCanvas" width="220" height="36"></canvas>
+      
+      <div class="transport">
+        <button class="btn btn-primary" id="playBtn"   disabled>▶</button>
+        <button class="btn btn-ghost"   id="stopBtn"   disabled>■</button>
+        <button class="btn btn-danger"  id="recBtn"    disabled>⏺</button>
+        <button class="btn btn-export"  id="exportBtn" disabled title="Offline render — без лагов">
+          ↓ EXPORT
+        </button>
+      </div>
+    </div>
+
+    <!-- ПАРАМЕТРЫ - компактно в 2 ряда -->
+    <div class="params-compact">
+      <div class="param-compact">
+        <span class="param-label">БАС</span>
+        <input type="range" id="bassSens" min="0.1" max="3" step="0.1" value="1.2" />
+        <span class="param-val" id="bassSensVal">1.2</span>
+      </div>
+      
+      <div class="param-compact">
+        <span class="param-label">МАСШТАБ</span>
+        <input type="range" id="maxScale" min="1.05" max="4" step="0.05" value="2" />
+        <span class="param-val" id="maxScaleVal">2</span>
+      </div>
+      
+      
+      <div class="param-compact">
+        <span class="param-label">FADE</span>
+        <input type="range" id="fadeDur" min="30" max="800" step="10" value="200" />
+        <span class="param-val" id="fadeDurVal">200</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══ ПРАВАЯ ПАНЕЛЬ: ОЧЕРЕДЬ ТЕКСТА ══ -->
+  <div class="panel right">
+    <div class="panel-label">// ОЧЕРЕДЬ ТЕКСТА</div>
+    <div class="panel-scroll" style="flex:1;">
+      <ul class="lyric-list" id="lyricList"></ul>
+    </div>
+  </div>
+
+</div>
+
+<script src="LRCParser.js"></script>
+<script src="AudioEngine.js"></script>
+<script src="physics-and-anim.js"></script>
+<script src="BackgroundEngine.js"></script>
+<script src="renderers.js"></script>
+<script src="BoxStyles.js"></script>
+<script src="FxEditor.js"></script>
+<script src="webm-muxer.js"></script>
+<script src="ExportEngine.js"></script>
+<script src="PresetManager.js"></script>
+<script src="App.js"></script>
+
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  App.init();
+  
+  // Section navigation
+  const navBtns = document.querySelectorAll('.nav-btn');
+  const sectionGroups = document.querySelectorAll('.section-group');
+  
+  navBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetSection = btn.dataset.section;
+      
+      // Update active button
+      navBtns.forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      
+      // Show only target section
+      sectionGroups.forEach(group => {
+        if (group.dataset.group === targetSection) {
+          group.style.display = 'block';
+        } else {
+          group.style.display = 'none';
+        }
+      });
+    });
+  });
+  
+  // Initialize - show only first section
+  sectionGroups.forEach((group, idx) => {
+    group.style.display = idx === 0 ? 'block' : 'none';
+  });
+  
+  // Camera controls
+  const camZoomToggle = document.getElementById('camZoomToggle');
+  const camZoomSlider = document.getElementById('camZoomVal');
+  const camZoomLabel = document.getElementById('camZoomValLabel');
+  
+  camZoomToggle.addEventListener('click', () => {
+    const newVal = !BackgroundEngine.camState.zoom.enabled;
+    BackgroundEngine.setCamParam('zoom', 'enabled', newVal);
+    camZoomToggle.classList.toggle('active', newVal);
+  });
+  
+  camZoomSlider.addEventListener('input', () => {
+    const v = parseFloat(camZoomSlider.value);
+    camZoomLabel.textContent = v.toFixed(2);
+    BackgroundEngine.setCamParam('zoom', 'value', v);
+  });
+  
+  const camMZToggle = document.getElementById('camMusicZoomToggle');
+  const camMZDir = document.getElementById('camMusicZoomDir');
+  const camMZAmt = document.getElementById('camMusicZoomAmt');
+  const camMZAmtLabel = document.getElementById('camMusicZoomAmtLabel');
+  
+  camMZToggle.addEventListener('click', () => {
+    const newVal = !BackgroundEngine.camState.musicZoom.enabled;
+    BackgroundEngine.setCamParam('musicZoom', 'enabled', newVal);
+    camMZToggle.classList.toggle('active', newVal);
+  });
+  
+  camMZDir.addEventListener('click', () => {
+    const invert = !BackgroundEngine.camState.musicZoom.invert;
+    BackgroundEngine.setCamParam('musicZoom', 'invert', invert);
+    camMZDir.textContent = invert ? '← наружу' : '→ вовнутрь';
+  });
+  
+  camMZAmt.addEventListener('input', () => {
+    const v = parseFloat(camMZAmt.value);
+    camMZAmtLabel.textContent = v.toFixed(2);
+    BackgroundEngine.setCamParam('musicZoom', 'amount', v);
+  });
+  
+  const camScrollLeft = document.getElementById('camScrollLeft');
+  const camScrollRight = document.getElementById('camScrollRight');
+  const camScrollXSpd = document.getElementById('camScrollXSpeed');
+  const camScrollXLbl = document.getElementById('camScrollXSpeedLabel');
+  
+  function setScrollX(dir) {
+    const alreadyActive = BackgroundEngine.camState.scrollX.enabled && BackgroundEngine.camState.scrollX.direction === dir;
+    if (alreadyActive) {
+      BackgroundEngine.setCamParam('scrollX', 'enabled', false);
+    } else {
+      BackgroundEngine.setCamParam('scrollX', 'enabled', true);
+      BackgroundEngine.setCamParam('scrollX', 'direction', dir);
+    }
+    updateScrollXBtns();
+  }
+  
+  camScrollLeft.addEventListener('click', () => setScrollX(-1));
+  camScrollRight.addEventListener('click', () => setScrollX(1));
+  
+  function updateScrollXBtns() {
+    const s = BackgroundEngine.camState.scrollX;
+    camScrollLeft.classList.toggle('active', s.enabled && s.direction === -1);
+    camScrollRight.classList.toggle('active', s.enabled && s.direction === 1);
+  }
+  
+  camScrollXSpd.addEventListener('input', () => {
+    const v = parseFloat(camScrollXSpd.value);
+    camScrollXLbl.textContent = v.toFixed(3);
+    BackgroundEngine.setCamParam('scrollX', 'speed', v);
+  });
+  
+  const camScrollUp = document.getElementById('camScrollUp');
+  const camScrollDown = document.getElementById('camScrollDown');
+  const camScrollYSpd = document.getElementById('camScrollYSpeed');
+  const camScrollYLbl = document.getElementById('camScrollYSpeedLabel');
+  
+  function setScrollY(dir) {
+    const alreadyActive = BackgroundEngine.camState.scrollY.enabled && BackgroundEngine.camState.scrollY.direction === dir;
+    if (alreadyActive) {
+      BackgroundEngine.setCamParam('scrollY', 'enabled', false);
+    } else {
+      BackgroundEngine.setCamParam('scrollY', 'enabled', true);
+      BackgroundEngine.setCamParam('scrollY', 'direction', dir);
+    }
+    updateScrollYBtns();
+  }
+  
+  camScrollUp.addEventListener('click', () => setScrollY(-1));
+  camScrollDown.addEventListener('click', () => setScrollY(1));
+  
+  function updateScrollYBtns() {
+    const s = BackgroundEngine.camState.scrollY;
+    camScrollUp.classList.toggle('active', s.enabled && s.direction === -1);
+    camScrollDown.classList.toggle('active', s.enabled && s.direction === 1);
+  }
+  
+  camScrollYSpd.addEventListener('input', () => {
+    const v = parseFloat(camScrollYSpd.value);
+    camScrollYLbl.textContent = v.toFixed(3);
+    BackgroundEngine.setCamParam('scrollY', 'speed', v);
+  });
+  
+  document.getElementById('camStopAll').addEventListener('click', () => {
+    BackgroundEngine.setCamParam('scrollX', 'enabled', false);
+    BackgroundEngine.setCamParam('scrollY', 'enabled', false);
+    BackgroundEngine.setCamParam('musicZoom', 'enabled', false);
+    camMZToggle.classList.remove('active');
+    updateScrollXBtns();
+    updateScrollYBtns();
+  });
+  
+  document.getElementById('camResetPos').addEventListener('click', () => {
+    BackgroundEngine.resetCamera();
+    BackgroundEngine.setCamParam('scrollX', 'enabled', false);
+    BackgroundEngine.setCamParam('scrollY', 'enabled', false);
+    BackgroundEngine.setCamParam('musicZoom', 'enabled', false);
+    camMZToggle.classList.remove('active');
+    updateScrollXBtns();
+    updateScrollYBtns();
+  });
+});
+</script>
+</body>
+</html>
