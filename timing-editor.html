@@ -166,31 +166,11 @@ textarea:focus {
   opacity: 0.3;
   cursor: not-allowed;
 }
-.seek-slider {
+.seek-canvas {
   flex: 1;
-  height: 6px;
-  background: #1a1a1a;
-  border-radius: 3px;
-  outline: none;
-  -webkit-appearance: none;
-  appearance: none;
+  height: 30px;
   cursor: pointer;
-}
-.seek-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 16px;
-  height: 16px;
-  background: #e8ff00;
-  border-radius: 50%;
-  cursor: pointer;
-}
-.seek-slider::-moz-range-thumb {
-  width: 16px;
-  height: 16px;
-  background: #e8ff00;
-  border-radius: 50%;
-  cursor: pointer;
-  border: none;
+  display: block;
 }
 .time {
   font-family: monospace;
@@ -530,7 +510,7 @@ textarea:focus {
   <div class="center">
     <div class="transport">
       <button class="play-btn" id="playBtn" disabled>▶ PLAY</button>
-      <input type="range" class="seek-slider" id="seekSlider" min="0" max="1000" value="0" />
+      <canvas class="seek-canvas" id="seekCanvas"></canvas>
       <span class="time" id="currentTime">00:00.00</span>
       <span>/</span>
       <span class="time" id="totalTime">00:00.00</span>

@@ -47,6 +47,7 @@ const App = (() => {
 
   // ── Resolution map
   const RES = {
+    '3840x2160': [3840, 2160],
     '1920x1080': [1920, 1080],
     '1280x720':  [1280, 720],
     '1080x1080': [1080, 1080],
@@ -57,8 +58,20 @@ const App = (() => {
     const [w, h] = RES[key] || [1280, 720];
     canvas.width  = w;
     canvas.height = h;
-    const maxW = canvas.parentElement.clientWidth  - 32;
-    const maxH = canvas.parentElement.clientHeight - 130;
+
+    // Меряем по .canvas-area (дедушка) — у него стабильный размер от грид-сетки.
+    // Если мерять по .canvas-wrap (родитель), он сам подстраивается под канвас и
+    // даёт обратную связь: чем меньше канвас, тем меньше wrap, тем меньше канвас…
+    const area      = canvas.closest('.canvas-area') || canvas.parentElement;
+    const controls  = area.querySelector('.controls-row');
+    const ctrlH     = controls ? controls.getBoundingClientRect().height : 0;
+    const areaStyle = getComputedStyle(area);
+    const padX = parseFloat(areaStyle.paddingLeft)   + parseFloat(areaStyle.paddingRight);
+    const padY = parseFloat(areaStyle.paddingTop)    + parseFloat(areaStyle.paddingBottom);
+    const gap  = parseFloat(areaStyle.rowGap || areaStyle.gap || 0);
+
+    const maxW = area.clientWidth  - padX;
+    const maxH = area.clientHeight - padY - ctrlH - gap;
     const s    = Math.min(maxW / w, maxH / h, 1);
     canvas.style.width  = `${Math.round(w * s)}px`;
     canvas.style.height = `${Math.round(h * s)}px`;
@@ -99,96 +112,185 @@ const App = (() => {
         if (lyrics[activeIdx] && lyrics[activeIdx].bgCommands) {
           lyrics[activeIdx].bgCommands.forEach(cmd => {
             BackgroundEngine.applyBackgroundCommand(cmd);
+            if (BackgroundManager.hasEntries) BackgroundManager.applyFxCommand(cmd);
           });
+        }
+
+        // Активируем кам-сцену из коллекции (если строка приписана к одной).
+        // Анимация играется один раз на весь contiguous-блок строк, привязанных
+        // к ТОЙ ЖЕ сцене (а не перезапускается на каждой строке).
+        const _curLyric = lyrics[activeIdx];
+        const _sceneAssign = (BackgroundEngine.findCamSceneForLine
+          ? BackgroundEngine.findCamSceneForLine(activeIdx) : null);
+        if (_curLyric && _sceneAssign) {
+          let _runStart = activeIdx, _runEnd = activeIdx;
+          while (_runStart > 0 &&
+                 BackgroundEngine.findCamSceneForLine(_runStart - 1) === _sceneAssign) _runStart--;
+          while (_runEnd < lyrics.length - 1 &&
+                 BackgroundEngine.findCamSceneForLine(_runEnd + 1) === _sceneAssign) _runEnd++;
+          const _blockStart = lyrics[_runStart].time;
+          const _blockEnd   = (_runEnd + 1 < lyrics.length)
+            ? lyrics[_runEnd + 1].time
+            : lyrics[_runEnd].time + 4;
+          BackgroundEngine.setLineCamScene(_sceneAssign, _blockStart, _blockEnd - _blockStart, {
+            currentLineIdx: activeIdx,
+            blockStartLine: _runStart,
+            blockEndLine:   _runEnd,
+          });
+        } else if (BackgroundEngine.clearLineCamScene) {
+          BackgroundEngine.clearLineCamScene();
         }
       }
     }
 
     // ── Background
     const cw = canvas.width, ch = canvas.height;
-    if (BackgroundEngine.hasMedia) {
+
+    // ═══════════════════════════════════════════════
+    // ВАЖНО: сначала считаем AnimMode, чтобы получить cameraOverride
+    // (например montage зумит фон вместе с текстом). Потом применяем
+    // override к BackgroundEngine и только после этого рисуем фон.
+    // Переменные: _animResult, _lyric, _elapsed, _dur, _fadeA, _ls
+    // валидны только если есть активная лирика — используем их позже.
+    // ═══════════════════════════════════════════════
+    let _animResult = null, _lyric = null, _elapsed = 0, _dur = 0;
+    let _fadeA = 0, _ls = null;
+    let _effectiveFont = params.font, _effectiveSize = params.fontSize;
+    let _effectiveColor = params.color, _effectivePos = params.textPosition;
+
+    if (activeIdx >= 0 && activeIdx < lyrics.length) {
+      _lyric   = lyrics[activeIdx];
+      _elapsed = t - _lyric.time;
+      _dur     = activeIdx + 1 < lyrics.length
+        ? lyrics[activeIdx + 1].time - _lyric.time
+        : 4;
+      _fadeA = TextRenderer.getFadeAlpha(_elapsed, _dur, params.fadeDur);
+      _ls    = _lyric.lineStyle || {};
+      _effectiveFont  = _ls.font      || params.font;
+      _effectiveSize  = _ls.fontSize  || params.fontSize;
+      _effectiveColor = _ls.color     || params.color;
+      const _effectiveAnim = _ls.animMode || params.animMode;
+      _effectivePos   = _ls.position  || params.textPosition;
+
+      const modeFn = AnimModes[_effectiveAnim] || AnimModes.pulse;
+      const words  = _lyric.text
+        ? _lyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
+        : [];
+      _animResult = modeFn({
+        bands, t, params, springs,
+        words,
+        canvasW:  cw,
+        canvasH:  ch,
+        elapsed:  _elapsed,
+        duration: _dur,
+        fontSize: _effectiveSize,
+        ctx,
+        font:     _effectiveFont,
+      });
+
+      // ── Применяем camera override к фону (montage и др.) ──
+      // КЛЮЧЕВОЙ МОМЕНТ: camera-эффект имеет ОТДЕЛЬНЫЙ длинный fade
+      // (600мс) вместо короткого fadeA (200мс). Почему:
+      //   - fadeA короткий для читаемости текста (200мс не мешает чтению)
+      //   - но если фон резко зумится с 1.0 до 1.8 за 200мс — это хлопок
+      //     Особенно заметно когда предыдущая строка была БЕЗ montage,
+      //     и фон был в состоянии zoom=1.0. Переход 1.0 → 1.8 за 200мс
+      //     выглядит как эффект-удар, а не кинематография.
+      // Решение: cameraK растёт 600мс с smoothstep easing, давая плавное
+      // "вплывание" камеры. На выходе — 500мс smoothstep out.
+      if (_animResult && _animResult.cameraOverride && BackgroundEngine.setTextDrivenCamera) {
+        const co = _animResult.cameraOverride;
+        const FADE_IN_CAM  = 0.60;
+        const FADE_OUT_CAM = 0.50;
+        const inProg  = Math.min(_elapsed / FADE_IN_CAM, 1);
+        const outProg = _dur > 0 ? Math.min((_dur - _elapsed) / FADE_OUT_CAM, 1) : 1;
+        const rawK    = Math.max(0, Math.min(inProg, outProg, 1));
+        // Smoothstep 3x²-2x³: медленный старт и мягкая посадка
+        const cameraK = rawK * rawK * (3 - 2 * rawK);
+        BackgroundEngine.setTextDrivenCamera({
+          zoomMul: 1 + (co.zoomMul - 1) * cameraK,
+          panX:    co.panX * cameraK,
+          panY:    co.panY * cameraK,
+        });
+      }
+    }
+
+    // КРИТИЧНО: тикаем blend сцены КАЖДЫЙ кадр, независимо от источника фона.
+    // Иначе при использовании BackgroundManager (per-line bg) BackgroundEngine.draw
+    // не вызывается, blend застревает на 0 и сцена не видна.
+    if (BackgroundEngine.tickLineScene) BackgroundEngine.tickLineScene(dt);
+
+    // Оборачиваем рендер фона сценическим transform (если активна кам-сцена).
+    // Эффект применяется ОДИНАКОВО и к BackgroundManager, и к BackgroundEngine,
+    // как viewport-камера поверх любого фонового рендера.
+    const _sceneApplied = BackgroundEngine.applySceneTransform
+      ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t)
+      : false;
+
+    if (BackgroundManager.hasEntries) {
+      // Менеджер фонов: тикаем + рисуем активный entry с per-bg настройками
+      BackgroundManager.tick(activeIdx, dt);
+      BackgroundManager.draw(ctx, cw, ch, bands, t, dt);
+      // Оверлеи затемнения/осветления из FX Editor работают поверх BackgroundManager
+      BackgroundEngine.drawFxOverlay(ctx, cw, ch, dt);
+    } else if (BackgroundEngine.hasMedia) {
       BackgroundEngine.draw(ctx, cw, ch, bands, t, dt);
     } else {
       ctx.fillStyle = '#0a0a0a';
       ctx.fillRect(0, 0, cw, ch);
     }
 
-    // ── Overlays BELOW text
-    const currentLyric = (activeIdx >= 0 && activeIdx < lyrics.length) ? lyrics[activeIdx] : null;
-    BackgroundEngine.drawOverlays('below', ctx, cw, ch, bands, t, dt, activeIdx, currentLyric);
+    if (_sceneApplied) ctx.restore();
 
-    // ── Text
-    if (activeIdx >= 0 && activeIdx < lyrics.length) {
-      const lyric   = lyrics[activeIdx];
-      const elapsed = t - lyric.time;
-      const dur     = activeIdx + 1 < lyrics.length
-        ? lyrics[activeIdx + 1].time - lyric.time
-        : 4;
-
-      const fadeA = TextRenderer.getFadeAlpha(elapsed, dur, params.fadeDur);
-
-      // ── Per-line style overrides (от FX Editor) ──
-      const ls             = lyric.lineStyle || {};
-      const effectiveFont  = ls.font      || params.font;
-      const effectiveSize  = ls.fontSize  || params.fontSize;
-      const effectiveColor = ls.color     || params.color;
-      const effectiveAnim  = ls.animMode  || params.animMode;
-      const effectivePos   = ls.position  || params.textPosition;
-
-      const modeFn = AnimModes[effectiveAnim] || AnimModes.pulse;
-
-      // Для кинетических layout-режимов передаём слова и размеры холста
-      // Убираем все {FX-теги} перед разбивкой на слова —
-      // сами теги нужны только parseSpans в рендерере, не AnimModes
-      const words  = lyric.text
-        ? lyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
-        : [];
-      const anim   = modeFn({
-        bands, t, params, springs,
-        words,
-        canvasW:  cw,
-        canvasH:  ch,
-        elapsed,
-        duration: dur,
-        fontSize: effectiveSize,
-      });
-
-      // Вычисляем Y позицию в зависимости от настройки
-      let textY = ch / 2; // по умолчанию центр
-      if (effectivePos === 'top') {
-        textY = ch * 0.15; // 15% от верха
-      } else if (effectivePos === 'bottom') {
-        textY = ch * 0.85; // 85% от верха (15% от низа)
-      }
-
-      // draw() возвращает реальный нижний край отрисованного текста —
-      // учитывает количество строк, scaleY анимации, offsetY пружин,
-      // и позиции слов при kinetic word-layout (flash/cascade/scatter/…)
-      const mainBottom = TextRenderer.draw(
-        ctx, lyric,
-        cw / 2, textY,
-        anim, fadeA,
-        effectiveColor, effectiveFont, effectiveSize, cw, t,
-        params.globalBoxId
-      );
-
-      // ── Перевод строки ──────────────────────────
-      if (params.showTranslation && lyric.translation) {
-        const trSize = Math.max(14, Math.round(effectiveSize * params.translationRatio));
-        // Встаём ровно под последней строкой основного текста
-        const trY    = (mainBottom ?? textY + effectiveSize) + trSize * 0.9;
-        const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
-        TextRenderer.draw(
-          ctx, { text: lyric.translation },
-          cw / 2, trY,
-          trAnim, fadeA,
-          params.translationColor, effectiveFont, trSize, cw, t
-        );
-      }
+    // Flash-overlay сцены (вспышки/затемнения по басу) — поверх фона, но
+    // перед текстом, чтобы лирика не моргала.
+    if (BackgroundEngine.applySceneFlash) {
+      BackgroundEngine.applySceneFlash(ctx, cw, ch, bands, t);
     }
 
-    // ── Overlays ABOVE text
-    BackgroundEngine.drawOverlays('above', ctx, cw, ch, bands, t, dt, activeIdx, currentLyric);
+    // ── Overlays + Text в правильном z-порядке ──
+    // drawOverlaysAll рендерит объекты в порядке массива,
+    // вставляя текст между последним 'below' и первым 'above' объектом.
+    const currentLyric = _lyric;
+    BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, () => {
+      // ── Text ──────────────────────────────────
+      if (_lyric && _animResult) {
+        // 9-позиционная сетка: top/center/bottom × left/center/right
+        // X: 0.15 / 0.50 / 0.85 от ширины
+        // Y: 0.15 / 0.50 / 0.85 от высоты
+        // legacy: 'top'/'center'/'bottom' = центральная колонка
+        let textX = cw / 2;
+        let textY = ch / 2;
+        const p = _effectivePos || 'center';
+        if (p.endsWith('-left'))  textX = cw * 0.15;
+        if (p.endsWith('-right')) textX = cw * 0.85;
+        if (p.startsWith('top'))    textY = ch * 0.15;
+        if (p.startsWith('bottom')) textY = ch * 0.85;
+        // explicit 'top' / 'bottom' (без -left/-right) — центрированы по X (textX=cw/2 default)
+
+        const mainBottom = TextRenderer.draw(
+          ctx, _lyric,
+          textX, textY,
+          _animResult, _fadeA,
+          _effectiveColor, _effectiveFont, _effectiveSize, cw, t,
+          params.globalBoxId
+        );
+
+        // ── Перевод строки ──────────────────────
+        if (params.showTranslation && _lyric.translation) {
+          const trSize = Math.max(14, Math.round(_effectiveSize * params.translationRatio));
+          const trY    = (mainBottom ?? textY + _effectiveSize) + trSize * 0.9;
+          const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
+          // Перевод следует за основным текстом по X (та же горизонтальная позиция)
+          TextRenderer.draw(
+            ctx, { text: _lyric.translation },
+            textX, trY,
+            trAnim, _fadeA,
+            params.translationColor, _effectiveFont, trSize, cw, t
+          );
+        }
+      }
+    });
 
     // ── Letterbox (поверх всего)
     BackgroundEngine.drawLetterboxLayer(ctx, cw, ch, bands, dt);
@@ -238,6 +340,10 @@ const App = (() => {
     lyrics    = LRCParser.parse(raw);
     activeIdx = -1;
     renderLyricList();
+    // Передаём в BackgroundManager для UI выбора строк (timeline-scope)
+    if (typeof BackgroundManager !== 'undefined') {
+      BackgroundManager.setLines(lyrics);
+    }
   }
 
   function renderLyricList() {
@@ -250,7 +356,13 @@ const App = (() => {
       const ls = l.lineStyle || {};
       const hasStyle = ls.font || ls.fontSize || ls.animMode || ls.color;
       const styleIcon = hasStyle ? `<span title="Свой стиль" style="color:var(--accent);margin-right:3px;">✦</span>` : '';
-      return `<li data-index="${i}">${styleIcon}${sectionLabel}<span class="ts">${fmtTime(l.time)}</span><span class="txt">${escHtml(l.text)}</span></li>`;
+      // Кам-сцена, если строка приписана к одной из них
+      const camScene = (typeof BackgroundEngine !== 'undefined' && BackgroundEngine.findCamSceneForLine)
+        ? BackgroundEngine.findCamSceneForLine(i) : null;
+      const camIcon  = camScene
+        ? `<span title="Кам. сцена: ${camScene.name} (${camScene.preset})" style="color:#00e5ff;margin-right:3px;">📷</span>`
+        : '';
+      return `<li data-index="${i}">${styleIcon}${camIcon}${sectionLabel}<span class="ts">${fmtTime(l.time)}</span><span class="txt">${escHtml(l.text)}</span></li>`;
     }).join('');
     
     // Добавляем обработчики кликов
@@ -261,13 +373,15 @@ const App = (() => {
           // Костыль: сначала стоп, потом плей
           AudioEngine.stop();
           BackgroundEngine.stopVideo();
+          if (typeof BackgroundManager !== 'undefined') { BackgroundManager.stopVideos(); BackgroundManager.resetFxOverrides(); }
           BackgroundEngine.resetCamera();
           activeIdx = -1;
-          
+
           // Небольшая задержка перед запуском
           setTimeout(() => {
             AudioEngine.play(lyrics[i].time);
             BackgroundEngine.playVideo();
+            if (typeof BackgroundManager !== 'undefined') BackgroundManager.playVideos();
             BackgroundEngine.resetCamera();
             resetSprings();
             setStatus('playing', 'Playing');
@@ -346,23 +460,33 @@ const App = (() => {
           if (b) b.disabled = false;
         });
         setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
+        // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
+        if (typeof AudioStorage !== 'undefined') {
+          AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
+        }
       } catch(err) {
         setStatus('error', 'Decode error');
         console.error(err);
       }
     });
 
-    // ── Background image/video
+    // ── Background image/video — quick-add к менеджеру фонов ──
     document.getElementById('bgFile').addEventListener('change', async e => {
-      const f = e.target.files[0];
-      if (!f) return;
+      const files = Array.from(e.target.files || []);
+      if (!files.length) return;
       const el = document.getElementById('bgDrop');
-      el.querySelector('.drop-name').textContent = f.name;
+      const dropName = el.querySelector('.drop-name');
       try {
-        const type = await BackgroundEngine.load(f);
+        for (const f of files) {
+          await BackgroundManager.addEntry(f);
+        }
         el.classList.add('loaded');
-        document.getElementById('bgTypeBadge').textContent = type.toUpperCase();
-      } catch(err) { console.error('BG load error', err); }
+        const count = BackgroundManager.entries.length;
+        if (dropName) dropName.textContent = `+ Добавить ещё (всего: ${count})`;
+        BackgroundManager.updateUiBadge();
+        // Клир инпута чтобы можно было заново выбрать те же файлы
+        e.target.value = '';
+      } catch(err) { console.error('BG add error', err); }
     });
 
     // ── LRC file upload
@@ -433,6 +557,34 @@ const App = (() => {
       FxEditor.openOverlayManager();
     });
 
+    // ── Background Manager
+    if (typeof BackgroundManager !== 'undefined') {
+      BackgroundManager.init();
+      bind('bgManagerBtn', 'click', () => {
+        // Передаём актуальный список строк в менеджер (для timeline-скоупа)
+        BackgroundManager.setLines(lyrics);
+        BackgroundManager.open();
+      });
+      // Восстанавливаем сохранённые фоны из IndexedDB после перезагрузки
+      if (typeof BackgroundManagerStorage !== 'undefined') {
+        BackgroundManager.restoreFromStorage()
+          .then(restored => {
+            if (restored) {
+              // Обновляем UI: галочка-loaded на drop-зоне + бэйдж количества
+              const dropEl = document.getElementById('bgDrop');
+              if (dropEl) {
+                dropEl.classList.add('loaded');
+                const dn = dropEl.querySelector('.drop-name');
+                const n = BackgroundManager.entries.length;
+                if (dn) dn.textContent = `↺ Восстановлено: ${n}. + Добавить ещё`;
+              }
+              BackgroundManager.updateUiBadge();
+            }
+          })
+          .catch(err => console.warn('[BGM] restore fail:', err));
+      }
+    }
+
     // ── Lyrics
     bind('parseLyricsBtn', 'click', parseLyrics);
     bind('clearLyricsBtn', 'click', () => {
@@ -446,6 +598,7 @@ const App = (() => {
       parseLyrics();
       AudioEngine.play(0);
       BackgroundEngine.playVideo();
+      if (typeof BackgroundManager !== 'undefined') { BackgroundManager.playVideos(); BackgroundManager.resetFxOverrides(); }
       BackgroundEngine.resetCamera();
       activeIdx = -1;
       resetSprings();
@@ -456,6 +609,7 @@ const App = (() => {
     bind('stopBtn', 'click', () => {
       AudioEngine.stop();
       BackgroundEngine.stopVideo();
+      if (typeof BackgroundManager !== 'undefined') { BackgroundManager.stopVideos(); BackgroundManager.resetFxOverrides(); }
       BackgroundEngine.resetCamera();  // Сбрасываем все эффекты и камеру
       if (Recorder.isRecording) Recorder.stop();
       activeIdx = -1;
@@ -492,6 +646,30 @@ const App = (() => {
     // ── Preset Manager UI
     if (typeof PresetManager !== 'undefined') {
       PresetManager.buildUI();
+    }
+
+    // ── Восстанавливаем аудио из IndexedDB после перезагрузки
+    if (typeof AudioStorage !== 'undefined') {
+      AudioStorage.load().then(async file => {
+        if (!file) return;
+        const el = document.getElementById('audioDrop');
+        setStatus('loading', 'Restoring audio…');
+        try {
+          await AudioEngine.loadBuffer(await file.arrayBuffer());
+          if (el) {
+            el.classList.add('loaded');
+            el.querySelector('.drop-name').textContent = '↺ ' + file.name;
+          }
+          ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
+            const b = document.getElementById(id);
+            if (b) b.disabled = false;
+          });
+          setStatus('ready', `Restored — ${fmtTime(AudioEngine.duration)}`);
+        } catch(err) {
+          console.warn('Audio restore failed:', err);
+          setStatus('idle', 'Ready');
+        }
+      }).catch(err => console.warn('AudioStorage.load failed:', err));
     }
 
     // ── Global Box selector
@@ -560,8 +738,23 @@ const App = (() => {
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
+  // ── Loop control (для ExportEngine: останавливаем живой рендер
+  //    на время экспорта, чтобы его draw()-вызовы не мутировали
+  //    глобальный state BackgroundEngine — musicZoomSpring и пр.)
+  function pauseLoop() {
+    if (rafId != null) { cancelAnimationFrame(rafId); rafId = null; }
+  }
+  function resumeLoop() {
+    if (rafId == null) {
+      lastT = performance.now();
+      rafId = requestAnimationFrame(render);
+    }
+  }
+
   return {
     init: initUI,
     getState: () => ({ lyrics, params }),
+    pauseLoop,
+    resumeLoop,
   };
 })();

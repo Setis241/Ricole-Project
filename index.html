@@ -52,13 +52,23 @@
         </div>
 
         <div class="section">
-          <label>Фон <span id="bgTypeBadge" style="color:var(--accent);font-size:8px;"></span></label>
+          <label>Фоны <span id="bgCountBadge" style="color:var(--accent);font-size:8px;"></span><span id="bgTypeBadge" style="color:var(--accent);font-size:8px;margin-left:6px;"></span></label>
+          <button class="btn btn-primary btn-full" id="bgManagerBtn" style="margin-bottom:8px;">🖼 УПРАВЛЕНИЕ ФОНАМИ</button>
           <div class="file-drop" id="bgDrop">
-            <span class="drop-icon">🖼</span>
-            <span class="drop-name">Картинка / Видео</span>
-            <input type="file" id="bgFile" accept="image/*,video/*" />
+            <span class="drop-icon">＋</span>
+            <span class="drop-name">Быстрое добавление (картинка / видео)</span>
+            <input type="file" id="bgFile" accept="image/*,video/*" multiple />
           </div>
-          <div style="margin-top:10px;">
+          <div style="margin-top:10px;font-size:8px;color:var(--muted);letter-spacing:1px;line-height:1.5;">
+            Несколько фонов с per-line scope, crossfade, аудио-реактивными эффектами.
+            Откройте менеджер для шикарной настройки.
+          </div>
+
+          <!-- ── Глобальные FX (применяются если менеджер фонов пуст — fallback) ── -->
+          <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--border);">
+            <div style="font-size:8px;color:var(--muted);letter-spacing:1px;margin-bottom:8px;">
+              ⤷ ГЛОБАЛЬНЫЕ FX (если менеджер пуст)
+            </div>
             <div class="toggle-row">
               <span>Кен Бёрнс</span>
               <div class="toggle on" id="fx-kenBurns"></div>
@@ -135,9 +145,21 @@
         <div class="section">
           <label>Позиция</label>
           <select id="textPosition">
-            <option value="center">Центр</option>
-            <option value="top">Верх</option>
-            <option value="bottom">Низ</option>
+            <optgroup label="Верх">
+              <option value="top-left">↖ Верх-лево</option>
+              <option value="top">↑ Верх-центр</option>
+              <option value="top-right">↗ Верх-право</option>
+            </optgroup>
+            <optgroup label="Центр">
+              <option value="center-left">← Центр-лево</option>
+              <option value="center" selected>● Центр</option>
+              <option value="center-right">→ Центр-право</option>
+            </optgroup>
+            <optgroup label="Низ">
+              <option value="bottom-left">↙ Низ-лево</option>
+              <option value="bottom">↓ Низ-центр</option>
+              <option value="bottom-right">↘ Низ-право</option>
+            </optgroup>
           </select>
         </div>
 
@@ -161,6 +183,15 @@
               <option value="snap">🧲 Snap — тетрис-склейка</option>
               <option value="scatter">💥 Scatter — хаос</option>
               <option value="path">〜 Path — волна</option>
+              <option value="impact">💥 Impact — вбивание со shockwave</option>
+              <option value="parallax">🌌 Parallax — 2.5D глубина</option>
+              <option value="shatter">✨ Shatter — сборка из букв</option>
+              <option value="cipher">🔐 Cipher — Matrix расшифровка</option>
+              <option value="orbit">🪐 Orbit — орбитальная посадка</option>
+              <option value="ripple">💧 Ripple — рябь на воде</option>
+              <option value="nova">🌟 Nova — крупный план каждого слова</option>
+              <option value="montage">🎬 Montage — камера зумит всю сцену</option>
+              <option value="drift">🌊 Drift — плавная кинокамера</option>
             </optgroup>
           </select>
         </div>
@@ -257,6 +288,7 @@
             <option value="1280x720">1280 × 720</option>
             <option value="1080x1080">1080 × 1080</option>
             <option value="1080x1920">1080 × 1920</option>
+            <option value="3840x2160">3840 × 2160 (4K)</option>
           </select>
         </div>
       </div>
@@ -326,10 +358,13 @@
 
 </div>
 
+<script src="AudioStorage.js"></script>
 <script src="LRCParser.js"></script>
 <script src="AudioEngine.js"></script>
 <script src="physics-and-anim.js"></script>
 <script src="BackgroundEngine.js"></script>
+<script src="BackgroundManagerStorage.js"></script>
+<script src="BackgroundManager.js"></script>
 <script src="renderers.js"></script>
 <script src="BoxStyles.js"></script>
 <script src="FxEditor.js"></script>

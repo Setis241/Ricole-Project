@@ -85,34 +85,77 @@ const ExportEngine = (() => {
     }
   }
 
-  /* ── Предрасчёт FFT для каждого кадра ────── */
+  /* ── Предрасчёт FFT для каждого кадра ──────
+     Воспроизводит AnalyserNode.getByteFrequencyData() 1-в-1,
+     чтобы bands.bass в экспорте совпадал с превью:
+       • окно Blackman (Web Audio spec), не Hann
+       • смещение НАЗАД (последние N сэмплов), не центрированное
+       • нормализация магнитуды на fftSize (не на fftSize/2)
+       • smoothingTimeConstant = 0.75 на линейных магнитудах
+       • dB-диапазон [-100, -30] (дефолты Web Audio)
+     Именно отсутствие smoothing'а + неверный dB-диапазон делали
+     спектр в экспорте «шипастым» и music-zoom — непохожим на превью.
+  */
   function precomputeFreqFrames(audioBuffer, fps, fftSize = 1024) {
     const sr    = audioBuffer.sampleRate;
     const total = Math.ceil(audioBuffer.duration * fps);
 
+    // Моно-даунмикс
     const mono = new Float32Array(audioBuffer.length);
     for (let c = 0; c < audioBuffer.numberOfChannels; c++) {
       const ch = audioBuffer.getChannelData(c);
       for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / audioBuffer.numberOfChannels;
     }
 
-    const hann = Float32Array.from({length: fftSize},
-      (_, i) => 0.5 * (1 - Math.cos(2 * Math.PI * i / fftSize)));
+    // Blackman window — именно его использует Web Audio AnalyserNode.
+    // w(n) = 0.42 − 0.5·cos(2πn/(N−1)) + 0.08·cos(4πn/(N−1))
+    const win = new Float32Array(fftSize);
+    for (let i = 0; i < fftSize; i++) {
+      const x = 2 * Math.PI * i / (fftSize - 1);
+      win[i] = 0.42 - 0.5 * Math.cos(x) + 0.08 * Math.cos(2 * x);
+    }
+
+    // Параметры, идентичные AudioEngine.analyser:
+    //   smoothingTimeConstant = 0.75
+    //   minDecibels/maxDecibels = -100 / -30 (дефолты Web Audio)
+    const TAU      = 0.75;
+    const MIN_DB   = -100;
+    const MAX_DB   = -30;
+    const DB_RANGE = MAX_DB - MIN_DB;
+
+    // Персистентный сглаженный магнитудный спектр между кадрами —
+    // эмулирует внутреннее состояние AnalyserNode.
+    const prevMag = new Float32Array(fftSize >> 1);
 
     const frames = [];
     for (let f = 0; f < total; f++) {
-      const center = Math.round(f * sr / fps);
-      const start  = Math.max(0, center - (fftSize >> 1));
+      // Web Audio берёт ПОСЛЕДНИЕ N сэмплов (окно смотрит назад).
+      // Центрированное окно сдвигало бы тайминг бас-атак на ~11 мс вперёд.
+      const end   = Math.round(f * sr / fps);
+      const start = Math.max(0, end - fftSize);
+
       const re = new Float32Array(fftSize);
       const im = new Float32Array(fftSize);
-      for (let i = 0; i < fftSize; i++) re[i] = (mono[start + i] || 0) * hann[i];
+      for (let i = 0; i < fftSize; i++) {
+        const idx = start + i;
+        re[i] = (idx < mono.length ? mono[idx] : 0) * win[i];
+      }
       computeFFT(re, im);
 
       const freq = new Uint8Array(fftSize >> 1);
       for (let i = 0; i < (fftSize >> 1); i++) {
-        const mag = Math.sqrt(re[i]*re[i] + im[i]*im[i]) / (fftSize >> 1);
-        const db  = 20 * Math.log10(mag + 1e-9);
-        freq[i] = Math.max(0, Math.min(255, ((db + 90) / 90) * 255));
+        // Нормализация на fftSize (как в AnalyserNode), не на fftSize/2
+        const raw = Math.sqrt(re[i] * re[i] + im[i] * im[i]) / fftSize;
+
+        // Межкадровое сглаживание (AnalyserNode.smoothingTimeConstant) —
+        // ключевой шаг, которого не было. Без него экспортный спектр
+        // в разы «шипастее» превью и зум реагирует иначе.
+        const smoothed = TAU * prevMag[i] + (1 - TAU) * raw;
+        prevMag[i] = smoothed;
+
+        const db   = 20 * Math.log10(smoothed + 1e-9);
+        const byte = ((db - MIN_DB) / DB_RANGE) * 255;
+        freq[i] = Math.max(0, Math.min(255, byte));
       }
       frames.push(freq);
     }
@@ -215,25 +258,19 @@ const ExportEngine = (() => {
       timestampOffset = opusPreSkip;
     }
 
-    // Soft limiter: tanh с headroom -0.5 dBFS предотвращает клиппинг и
-    // звуковые артефакты ("пердёж") при пиках выше 1.0 в исходнике.
-    // tanh(x) никогда не выходит за [-1, 1], при этом до ~0.9 почти линейна.
-    const LIMIT_GAIN = 0.9441; // -0.5 dBFS headroom
-    const softLimit = v => Math.tanh(v * LIMIT_GAIN);
-
     for (let offset = 0; offset < audioBuffer.length; offset += FRAME_SZ) {
       const sz   = Math.min(FRAME_SZ, audioBuffer.length - offset);
       const data = new Float32Array(sz * nch);
 
       if (nch === 1) {
         const src = audioBuffer.getChannelData(0);
-        for (let i = 0; i < sz; i++) data[i] = softLimit(src[offset + i] || 0);
+        for (let i = 0; i < sz; i++) data[i] = src[offset + i] || 0;
       } else {
         const ch0 = audioBuffer.getChannelData(0);
         const ch1 = audioBuffer.getChannelData(Math.min(1, audioBuffer.numberOfChannels - 1));
         for (let i = 0; i < sz; i++) {
-          data[i * 2]     = softLimit(ch0[offset + i] || 0);
-          data[i * 2 + 1] = softLimit(ch1[offset + i] || 0);
+          data[i * 2]     = ch0[offset + i] || 0;
+          data[i * 2 + 1] = ch1[offset + i] || 0;
         }
       }
 
@@ -253,9 +290,15 @@ const ExportEngine = (() => {
 
       timestampOffset += sz;
 
-      if (encoder.encodeQueueSize > 20) await encoder.flush();
+      // Backpressure: ждём пока очередь освободится, но НЕ flush'ом —
+      // flush в середине потока сбрасывает межкадровое предсказание Opus,
+      // что даёт слышимые щелчки/глитчи на стыках. Просто yield'им event loop.
+      while (encoder.encodeQueueSize > 20) {
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
 
+    // Единственный flush — в конце, чтобы добить хвост очереди перед close
     await encoder.flush();
     encoder.close();
   }
@@ -278,6 +321,25 @@ const ExportEngine = (() => {
       alert('webm-muxer.js не найден!\nПоложи webm-muxer.js рядом с index.html.'); return;
     }
 
+    // КРИТИЧНО: останавливаем живой рендер-луп на время экспорта.
+    // Иначе он параллельно вызывает BackgroundEngine.draw() с bands.bass=0
+    // (т.к. аудио не играет во время offline-рендера) и разбалтывает
+    // musicZoomSpring / _musicZoomBassSmooth — зум получается не таким,
+    // как в превью. Возобновляем в finally ниже.
+    const appInstance = (typeof App !== 'undefined') ? App : null;
+    appInstance?.pauseLoop?.();
+
+    try {
+      await _doRenderCore(preset, appState);
+    } finally {
+      appInstance?.resumeLoop?.();
+    }
+  }
+
+  async function _doRenderCore(preset, appState) {
+    const { lyrics, params } = appState;
+    const audioBuffer = AudioEngine.buffer;
+
     const { w, h, fps, vbr, abr } = preset;
     const dt          = 1 / fps;
     const duration    = audioBuffer.duration;
@@ -285,7 +347,38 @@ const ExportEngine = (() => {
     const sr          = audioBuffer.sampleRate;
     const nch         = Math.min(audioBuffer.numberOfChannels, 2);
 
-    setProgress(0, 'Анализ звука…');
+    // ── Прелоад шрифтов ─────────────────────────────────────────
+    // Без этого первые ~100-300 кадров рендерятся в дефолтном sans-serif:
+    // canvas.fillText() не ждёт загрузки кастомного шрифта, молча подставляя
+    // fallback. Браузер скачает шрифт где-то к середине трека → в видео
+    // видно как текст переключается со стандартного на нужный прямо в кадре.
+    // Лечится принудительной загрузкой всех font/size комбинаций ДО рендера.
+    setProgress(0, 'Загрузка шрифтов…');
+    await tick();
+
+    if (document.fonts) {
+      const fontSpecs = new Set();
+      const addFont = (size, family) => {
+        if (size && family) fontSpecs.add(`${size}px "${family}"`);
+      };
+
+      addFont(params.fontSize, params.font);
+      if (params.showTranslation) {
+        const trSize = Math.max(14, Math.round(params.fontSize * (params.translationRatio || 0.40)));
+        addFont(trSize, params.font);
+      }
+      for (const lyric of lyrics) {
+        const ls = lyric.lineStyle || {};
+        addFont(ls.fontSize || params.fontSize, ls.font || params.font);
+      }
+
+      await Promise.all([...fontSpecs].map(spec =>
+        document.fonts.load(spec).catch(() => {/* недоступный шрифт — пускай fallback */})
+      ));
+      await document.fonts.ready;
+    }
+
+    setProgress(2, 'Анализ звука…');
     await tick();
     const freqFrames = precomputeFreqFrames(audioBuffer, fps);
 
@@ -302,9 +395,15 @@ const ExportEngine = (() => {
       firstTimestampBehavior: 'permissive',
     });
 
-    // VP9 профиль: level 4.1 для 1080p60/4K, 3.1 для остального
-    const needsHighLevel = (w >= 1920 && fps >= 60) || w >= 3840;
-    const vp9Codec = needsHighLevel ? 'vp09.00.41.08' : 'vp09.00.31.08';
+    // VP9 level выбирается по фактическому разрешению/fps согласно спеке:
+    //   5.1 — 4K60 (3840×2160 @ 60fps)
+    //   5.0 — 4K30 (3840×2160 @ 30fps)  ← раньше тут ошибочно стоял 4.1
+    //   4.1 — 1080p60
+    //   3.1 — всё что ниже
+    let vp9Codec;
+    if (w >= 3840)                    vp9Codec = fps >= 60 ? 'vp09.00.51.08' : 'vp09.00.50.08';
+    else if (w >= 1920 && fps >= 60)  vp9Codec = 'vp09.00.41.08';
+    else                              vp9Codec = 'vp09.00.31.08';
 
     const videoEncoder = new VideoEncoder({
       output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
@@ -312,7 +411,9 @@ const ExportEngine = (() => {
     });
     videoEncoder.configure({
       codec: vp9Codec, width: w, height: h, bitrate: vbr, framerate: fps,
-      bitrateMode: 'constant',
+      // VBR — использует битрейт умнее: больше на сложных кадрах, меньше на статике.
+      // При том же среднем битрейте картинка чище чем у CBR.
+      bitrateMode: 'variable',
       latencyMode: 'quality',
     });
 
@@ -323,7 +424,18 @@ const ExportEngine = (() => {
     };
     const localBands = makeLocalBands();
 
-    if (typeof BackgroundEngine !== 'undefined') BackgroundEngine.resetCamera();
+    if (typeof BackgroundEngine !== 'undefined') {
+      BackgroundEngine.resetCamera();
+      // КРИТИЧНО: Принудительно пересоздаём springs для чистого старта экспорта
+      // Это гарантирует что экспорт начинается с нулевого состояния
+      if (BackgroundEngine._forceResetSprings) {
+        BackgroundEngine._forceResetSprings();
+      }
+    }
+    if (typeof BackgroundManager !== 'undefined' && BackgroundManager._forceReset) {
+      // Сбрасываем runtime-state менеджера фонов (KB позиции, scroll, smoothing)
+      BackgroundManager._forceReset();
+    }
     const bgMedia   = BackgroundEngine?.mediaElement;
     const isBgVideo = bgMedia instanceof HTMLVideoElement;
     if (isBgVideo) { bgMedia.pause(); bgMedia.currentTime = 0; }
@@ -364,15 +476,47 @@ const ExportEngine = (() => {
         localSprings.offsetY.reset(0);
         localSprings.offsetX.reset(0);
         if (activeIdx >= 0 && lyrics[activeIdx]?.bgCommands) {
-          lyrics[activeIdx].bgCommands.forEach(
-            cmd => BackgroundEngine.applyBackgroundCommand(cmd)
-          );
+          lyrics[activeIdx].bgCommands.forEach(cmd => {
+            BackgroundEngine.applyBackgroundCommand(cmd);
+            if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) BackgroundManager.applyFxCommand(cmd);
+          });
+        }
+
+        // Кам-сцена при экспорте — анимация на весь contiguous-блок (как в realtime)
+        const _curLyricE = lyrics[activeIdx];
+        const _sceneAssignE = (BackgroundEngine.findCamSceneForLine
+          ? BackgroundEngine.findCamSceneForLine(activeIdx) : null);
+        if (_curLyricE && _sceneAssignE) {
+          let _runStart = activeIdx, _runEnd = activeIdx;
+          while (_runStart > 0 &&
+                 BackgroundEngine.findCamSceneForLine(_runStart - 1) === _sceneAssignE) _runStart--;
+          while (_runEnd < lyrics.length - 1 &&
+                 BackgroundEngine.findCamSceneForLine(_runEnd + 1) === _sceneAssignE) _runEnd++;
+          const _blockStart = lyrics[_runStart].time;
+          const _blockEnd   = (_runEnd + 1 < lyrics.length)
+            ? lyrics[_runEnd + 1].time
+            : lyrics[_runEnd].time + 4;
+          BackgroundEngine.setLineCamScene(_sceneAssignE, _blockStart, _blockEnd - _blockStart, {
+            currentLineIdx: activeIdx,
+            blockStartLine: _runStart,
+            blockEndLine:   _runEnd,
+          });
+        } else if (BackgroundEngine.clearLineCamScene) {
+          BackgroundEngine.clearLineCamScene();
         }
       }
 
       localSprings.scale.update(dt);
       localSprings.offsetY.update(dt);
       localSprings.offsetX.update(dt);
+
+      // КРИТИЧНО: BackgroundManager.tick ДО любых seek и draw — потому что
+      // он определяет _activeId, от которого зависит _activeVideos() ниже.
+      // Без этого на первом кадре _activeId === null, и видео никогда не
+      // получит seek → экспорт показывает чёрный фон (или зависший первый кадр).
+      if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
+        BackgroundManager.tick(activeIdx, dt);
+      }
 
       // Видео-фон: seek с ожиданием каждые N кадров для точной синхронизации
       // Между seek'ами браузер сам движет currentTime при drawImage
@@ -387,6 +531,21 @@ const ExportEngine = (() => {
         }
       }
 
+      // BackgroundManager видео: seek активных video-entries (если есть)
+      // Теперь вызывается ПОСЛЕ tick, поэтому _activeVideos() возвращает корректный набор.
+      if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries && BackgroundManager._activeVideos) {
+        const actVids = BackgroundManager._activeVideos();
+        for (const { video } of actVids) {
+          if (video.readyState >= 2) {
+            const drift = Math.abs(video.currentTime - t);
+            if (drift > dt * 0.5 || fi % (fps * 2) === 0) {
+              video.currentTime = t;
+              if (drift > dt * 3) await new Promise(r => { const s = () => { video.removeEventListener('seeked', s); r(); }; video.addEventListener('seeked', s); });
+            }
+          }
+        }
+      }
+
       // КРИТИЧНО: Сбрасываем состояние canvas перед каждым кадром
       offCtx.save();
       offCtx.globalAlpha = 1;
@@ -395,76 +554,132 @@ const ExportEngine = (() => {
       offCtx.shadowBlur = 0;
       offCtx.shadowColor = 'transparent';
 
-      if (BackgroundEngine.hasMedia) {
+      // ═══════════════════════════════════════════════
+      // Сначала считаем AnimMode для получения cameraOverride (montage и пр.).
+      // Сохраняем результат в _exportAnim, чтобы повторно использовать при
+      // рендере текста ниже.
+      // ═══════════════════════════════════════════════
+      let _exportAnim = null, _exportLyric = null;
+      let _exportFadeA = 0, _exportFont = params.font, _exportSize = params.fontSize;
+      let _exportColor = params.color, _exportPos = 'center';
+      let _exportElapsed = 0, _exportDur = 0;
+
+      if (activeIdx >= 0 && activeIdx < lyrics.length) {
+        _exportLyric   = lyrics[activeIdx];
+        _exportElapsed = t - _exportLyric.time;
+        _exportDur     = activeIdx + 1 < lyrics.length
+          ? lyrics[activeIdx + 1].time - _exportLyric.time : 4;
+        _exportFadeA = TextRenderer.getFadeAlpha(_exportElapsed, _exportDur, params.fadeDur);
+        const _ls    = _exportLyric.lineStyle || {};
+        _exportFont  = _ls.font     || params.font;
+        _exportSize  = _ls.fontSize || params.fontSize;
+        _exportColor = _ls.color    || params.color;
+        const animKey = _ls.animMode || params.animMode;
+        _exportPos   = _ls.position || params.textPosition || 'center';
+        const modeFn = AnimModes[animKey] || AnimModes.pulse;
+
+        const words  = _exportLyric.text
+          ? _exportLyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
+          : [];
+        _exportAnim = modeFn({
+          bands, t, params, springs: localSprings,
+          words,
+          canvasW:  w,
+          canvasH:  h,
+          elapsed:  _exportElapsed,
+          duration: _exportDur,
+          fontSize: _exportSize,
+          ctx:      offCtx,
+          font:     _exportFont,
+        });
+
+        // ── Camera override к фону (montage, drift) ──
+        // Длинный cameraK (600мс ramp-up, 500мс ramp-out) с smoothstep
+        // даёт мягкое "вплывание" эффекта. Без этого фон резко прыгает
+        // в zoom за 200мс (fadeA), что выглядит хлопком. Описание логики
+        // идентично App.js.
+        if (_exportAnim && _exportAnim.cameraOverride && BackgroundEngine.setTextDrivenCamera) {
+          const co = _exportAnim.cameraOverride;
+          const FADE_IN_CAM  = 0.60;
+          const FADE_OUT_CAM = 0.50;
+          const inProg  = Math.min(_exportElapsed / FADE_IN_CAM, 1);
+          const outProg = _exportDur > 0
+            ? Math.min((_exportDur - _exportElapsed) / FADE_OUT_CAM, 1) : 1;
+          const rawK    = Math.max(0, Math.min(inProg, outProg, 1));
+          const cameraK = rawK * rawK * (3 - 2 * rawK);
+          BackgroundEngine.setTextDrivenCamera({
+            zoomMul: 1 + (co.zoomMul - 1) * cameraK,
+            panX:    co.panX * cameraK,
+            panY:    co.panY * cameraK,
+          });
+        }
+      }
+
+      // Тик blend сцены — независимо от источника фона (см. App.js)
+      if (BackgroundEngine.tickLineScene) BackgroundEngine.tickLineScene(dt);
+
+      // Сценический transform поверх любого фонового рендера (как viewport-камера)
+      const _exportSceneApplied = BackgroundEngine.applySceneTransform
+        ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t)
+        : false;
+
+      if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
+        // Менеджер фонов: tick уже сделан выше до seek; здесь только рисуем активный entry.
+        BackgroundManager.draw(offCtx, w, h, bands, t, dt);
+        // Оверлеи затемнения/осветления из FX Editor работают поверх BackgroundManager
+        BackgroundEngine.drawFxOverlay(offCtx, w, h, dt);
+      } else if (BackgroundEngine.hasMedia) {
         BackgroundEngine.draw(offCtx, w, h, bands, t, dt);
       } else {
         offCtx.fillStyle = '#0a0a0a';
         offCtx.fillRect(0, 0, w, h);
       }
 
-      const currentLyric = (activeIdx >= 0 && activeIdx < lyrics.length) ? lyrics[activeIdx] : null;
-      BackgroundEngine.drawOverlays('below', offCtx, w, h, bands, t, dt, activeIdx, currentLyric);
+      if (_exportSceneApplied) offCtx.restore();
 
-      // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
-      offCtx.globalAlpha = 1;
-
-      if (activeIdx >= 0 && activeIdx < lyrics.length) {
-        const lyric   = lyrics[activeIdx];
-        const elapsed = t - lyric.time;
-        const dur     = activeIdx + 1 < lyrics.length
-          ? lyrics[activeIdx + 1].time - lyric.time : 4;
-
-        const fadeA  = TextRenderer.getFadeAlpha(elapsed, dur, params.fadeDur);
-        const ls     = lyric.lineStyle || {};
-        const font   = ls.font     || params.font;
-        const size   = ls.fontSize || params.fontSize;
-        const color  = ls.color    || params.color;
-        const anim   = ls.animMode || params.animMode;
-        const pos    = ls.position || params.textPosition || 'center';
-        const modeFn = AnimModes[anim] || AnimModes.pulse;
-        
-        // Для кинетических layout-режимов передаём слова и размеры холста
-        const words  = lyric.text
-          ? lyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
-          : [];
-        const tr     = modeFn({
-          bands, t, params, springs: localSprings,
-          words,
-          canvasW:  w,
-          canvasH:  h,
-          elapsed,
-          duration: dur,
-          fontSize: size,
-        });
-
-        // Вычисляем Y позицию
-        let textY = h / 2;
-        if (pos === 'top') {
-          textY = h * 0.15;
-        } else if (pos === 'bottom') {
-          textY = h * 0.85;
-        }
-
-        const mainBottom = TextRenderer.draw(offCtx, lyric, w/2, textY, tr, fadeA, color, font, size, w, t);
-
-        // ── Перевод строки ──────────────────────────
-        if (params.showTranslation && lyric.translation) {
-          const trSize = Math.max(14, Math.round(size * (params.translationRatio || 0.40)));
-          const trY    = (mainBottom ?? textY + size) + trSize * 0.9;
-          const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
-          TextRenderer.draw(
-            offCtx, { text: lyric.translation },
-            w / 2, trY,
-            trAnim, fadeA,
-            params.translationColor || '#999999', font, trSize, w, t
-          );
-        }
+      // Flash-overlay для рок/strobe пресетов (см. App.js)
+      if (BackgroundEngine.applySceneFlash) {
+        BackgroundEngine.applySceneFlash(offCtx, w, h, bands, t);
       }
 
-      // КРИТИЧНО: Сбрасываем globalAlpha перед рендером верхних overlays
-      offCtx.globalAlpha = 1;
+      const currentLyric = _exportLyric;
+      BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, () => {
+        // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
+        offCtx.globalAlpha = 1;
 
-      BackgroundEngine.drawOverlays('above', offCtx, w, h, bands, t, dt, activeIdx, currentLyric);
+        if (_exportLyric && _exportAnim) {
+          // 9-позиционная сетка: см. App.js
+          let textX = w / 2;
+          let textY = h / 2;
+          const pp = _exportPos || 'center';
+          if (pp.endsWith('-left'))  textX = w * 0.15;
+          if (pp.endsWith('-right')) textX = w * 0.85;
+          if (pp.startsWith('top'))    textY = h * 0.15;
+          if (pp.startsWith('bottom')) textY = h * 0.85;
+
+          const mainBottom = TextRenderer.draw(
+            offCtx, _exportLyric, textX, textY,
+            _exportAnim, _exportFadeA,
+            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId
+          );
+
+          // ── Перевод строки ──────────────────────────
+          if (params.showTranslation && _exportLyric.translation) {
+            const trSize = Math.max(14, Math.round(_exportSize * (params.translationRatio || 0.40)));
+            const trY    = (mainBottom ?? textY + _exportSize) + trSize * 0.9;
+            const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
+            TextRenderer.draw(
+              offCtx, { text: _exportLyric.translation },
+              textX, trY,
+              trAnim, _exportFadeA,
+              params.translationColor || '#999999', _exportFont, trSize, w, t
+            );
+          }
+        }
+
+        // КРИТИЧНО: Сбрасываем globalAlpha после текста
+        offCtx.globalAlpha = 1;
+      });
 
       // Letterbox поверх всего
       BackgroundEngine.drawLetterboxLayer(offCtx, w, h, bands, dt);

@@ -18,6 +18,11 @@
 ═══════════════════════════════════════════════ */
 const TextRenderer = (() => {
 
+  // Fallback на системные emoji-шрифты — без него canvas рисует только
+  // monochrome глифы или вообще ничего на месте 🎵 🎶 🔥 и т.п.
+  // Браузер сам подбирает первый доступный из цепочки по платформе.
+  const EMOJI_FB = ',"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji"';
+
   function getFadeAlpha(elapsed, duration, fadeDur) {
     const fadeIn  = Math.min(elapsed / fadeDur, 1);
     const fadeOut = duration > 0 ? Math.min((duration - elapsed) / fadeDur, 1) : 1;
@@ -43,7 +48,7 @@ const TextRenderer = (() => {
     // ВАЖНО: сначала убираем line-style теги {LFONT/LSIZE/LANIM/LCOLOR/LLAYER/LOVFX},
     // потом команды фона, потом метки секций — порядок решает!
     text = text
-      .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POS|BGIMG|OVFX):[^}]+\}/g, '') // убрать line-style теги
+      .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POS|BGIMG|OVFX):[^}]+\}|\{LNOBOX\}/g, '') // убрать line-style теги
       .replace(/\/[^\/]+\//g, '')                           // убрать ВСЕ /КОМАНДЫ/ включая /ZOOM IN/
       .trim();
     // После зачистки section-метка оказывается в начале — убираем
@@ -63,13 +68,24 @@ const TextRenderer = (() => {
       `|\\*\\*?|_(?!_)|~~?|~(?!~))`, 'g'
     );
 
+    // ── Box state init: подтягиваем ВСЕ id из BoxRegistry динамически.
+    //    Хардкод отсюда убран, иначе новые рамки (boxsub/boxstealth/boxintro…)
+    //    матчатся TAG_RE, но `if (k in state)` роняет их, и они не рисуются.
+    //    Retired-список оставлен, чтобы легаси-LRC не ломались.
+    const _ACTIVE_BOX_IDS  = typeof BoxRegistry !== 'undefined'
+      ? BoxRegistry.all.map(s => s.id)
+      : ['box','boxtape'];
+    const _RETIRED_BOX_IDS = (typeof BoxRegistry !== 'undefined' && BoxRegistry.retired)
+      ? BoxRegistry.retired
+      : ['boxneon','boxglass','boxshadow','boxrough','boxfire','boxice','boxholo','boxgold','boxcyber','boxrainbow','boxretro','boxaura','boxmatrix','boxsmoke','boxplasma','boxtattoo','boxsunset','boxlacquer','boxcrystal','boxdanger','boxdiamond','boxfault','boxink','boxportal','boxsigil','boxstatic','boxvhs','boxvirus','boxwave','boxwire'];
     const state = {
       bold:false,italic:false,underline:false,strike:false,
       big:false,small:false,glitch:false,glow:false,shake:false,wave:false,
       outline:false,rainbow:false,neon:false,blur:false,flicker:false,
-      box:false,boxneon:false,boxglass:false,boxshadow:false,boxtape:false,boxrough:false,boxfire:false,boxice:false,boxholo:false,boxgold:false,boxcyber:false,boxrainbow:false,boxretro:false,boxaura:false,boxmatrix:false,boxsmoke:false,boxplasma:false,boxtattoo:false,boxsunset:false,boxlacquer:false,boxcrystal:false,boxdanger:false,boxdiamond:false,boxfault:false,boxink:false,boxportal:false,boxsigil:false,boxstatic:false,boxvhs:false,boxvirus:false,boxwave:false,boxwire:false,
       color:null,
     };
+    for (const id of _ACTIVE_BOX_IDS)  state[id] = false;
+    for (const id of _RETIRED_BOX_IDS) if (!(id in state)) state[id] = false;
 
     const parts = [];
     let last = 0; let m;
@@ -82,12 +98,17 @@ const TextRenderer = (() => {
     if (last < text.length) parts.push({ type:'text', val:text.slice(last) });
 
     if (!parts.length || (parts.length===1 && parts[0].type==='text')) {
+      // Базовая болванка spana: все активные + retired box-флаги = false.
+      // Так span совместим и с BoxRegistry.spanBoxId(), и со старыми проверками в draw*.
+      const _emptyBoxes = {};
+      for (const id of _ACTIVE_BOX_IDS)  _emptyBoxes[id] = false;
+      for (const id of _RETIRED_BOX_IDS) _emptyBoxes[id] = false;
       return text.split(/\s+/).filter(Boolean).map(w=>({
         word:w, color:baseColor,
         bold:false,italic:false,underline:false,strike:false,
         big:false,small:false,glitch:false,glow:false,shake:false,wave:false,
         outline:false,rainbow:false,neon:false,blur:false,flicker:false,
-        box:false,boxneon:false,boxglass:false,boxshadow:false,boxtape:false,boxrough:false,boxfire:false,boxice:false,boxholo:false,boxgold:false,boxcyber:false,boxrainbow:false,boxretro:false,boxaura:false,boxmatrix:false,boxsmoke:false,boxplasma:false,boxtattoo:false,boxsunset:false,boxlacquer:false,boxcrystal:false,boxdanger:false,boxdiamond:false,boxfault:false,boxink:false,boxportal:false,boxsigil:false,boxstatic:false,boxvhs:false,boxvirus:false,boxwave:false,boxwire:false,
+        ..._emptyBoxes,
       }));
     }
 
@@ -156,7 +177,7 @@ const TextRenderer = (() => {
     let style = '';
     if (span.bold)   style += 'bold ';
     if (span.italic) style += 'italic ';
-    ctx.font = `${style}${size}px ${font}`;
+    ctx.font = `${style}${size}px ${font}${EMOJI_FB}`;
     const width = ctx.measureText(span.word).width;
     return { width: width || (span.word.trim()==='' ? size*0.3 : 0), size };
   }
@@ -649,7 +670,7 @@ const TextRenderer = (() => {
     let fontStyle = '';
     if (span.bold)   fontStyle += 'bold ';
     if (span.italic) fontStyle += 'italic ';
-    ctx.font = `${fontStyle}${size}px ${font}`;
+    ctx.font = `${fontStyle}${size}px ${font}${EMOJI_FB}`;
     ctx.textAlign    = 'center';
     ctx.textBaseline = 'middle';
     ctx.shadowBlur   = 0;
@@ -758,8 +779,10 @@ const TextRenderer = (() => {
     if (totalAlpha <= 0.001) return;
 
     // ── Global box для word-layout ──────────────────────────────────────
-    // Вычисляем bbox по всем словам с учётом их индивидуальных позиций и scale
-    if (globalBoxId && typeof BoxRegistry !== 'undefined') {
+    // Вычисляем bbox по всем словам с учётом их индивидуальных позиций и scale.
+    // Уважаем per-line opt-out: {LNOBOX} ⇒ lyric.lineStyle.noBox=true ⇒ пропустить.
+    const _noBox = !!(lyric && typeof lyric === 'object' && lyric.lineStyle && lyric.lineStyle.noBox);
+    if (globalBoxId && !_noBox && typeof BoxRegistry !== 'undefined') {
       const rawText2 = typeof lyric === 'string' ? lyric : (lyric.rawText || lyric.text || '');
       const spansCheck = parseSpans(rawText2, color, t);
       const hasAnySpanBox = spansCheck.some(sp => BoxRegistry.hasBox(sp));
@@ -778,7 +801,7 @@ const TextRenderer = (() => {
           const wScale    = wData.scale ?? 1;
           const wFontSize = fontSize * wScale;
           if (wFontSize < 2) continue;
-          ctx.font = `${wFontSize}px ${font}`;
+          ctx.font = `${wFontSize}px ${font}${EMOJI_FB}`;
           const tw = ctx.measureText(wData.word).width;
           const th = wFontSize * 0.75;
           const wx = cx + wData.x;
@@ -809,12 +832,19 @@ const TextRenderer = (() => {
     // ── Парсим rawText чтобы получить FX-стили для каждого слова ──
     // parseSpans группирует слова по стилю; разворачиваем их в
     // пословный массив, сохраняя FX-состояние каждого токена.
+    //
+    // anim.perLetter = true (режим shatter) — anim.words содержит БУКВЫ,
+    // а не слова. Маппинг wordSpans[wi] сломался бы (первые N букв получили
+    // бы стили первого слова). В этом случае пропускаем парсинг FX-тегов —
+    // буквы рисуются с базовым цветом строки, без per-word FX.
     const rawText  = typeof lyric === 'string' ? lyric : (lyric.rawText || lyric.text || '');
-    const spans    = parseSpans(rawText, color, t);
-    const wordSpans = [];               // один элемент = одно слово + его стиль
-    for (const sp of spans) {
-      const ws = sp.word.split(/\s+/).filter(Boolean);
-      for (const w of ws) wordSpans.push({ ...sp, word: w });
+    const wordSpans = [];
+    if (!anim.perLetter) {
+      const spans = parseSpans(rawText, color, t);
+      for (const sp of spans) {
+        const ws = sp.word.split(/\s+/).filter(Boolean);
+        for (const w of ws) wordSpans.push({ ...sp, word: w });
+      }
     }
 
     ctx.save();
@@ -846,7 +876,7 @@ const TextRenderer = (() => {
       const drawSize  = spanForDraw.big   ? wFontSize * 1.45
                       : spanForDraw.small ? wFontSize * 0.65
                       : wFontSize;
-      ctx.font        = `${fontStyle}${drawSize}px ${font}`;
+      ctx.font        = `${fontStyle}${drawSize}px ${font}${EMOJI_FB}`;
       ctx.textAlign    = 'center';
       ctx.textBaseline = 'middle';
       spanForDraw._w  = ctx.measureText(spanForDraw.word).width;
@@ -905,8 +935,10 @@ const TextRenderer = (() => {
     const startY   = cy - totalH/2 + lineH/2;
 
     // ── Global box fallback: если у строки нет своего бокса —
-    //    рисуем один общий бокс под весь текст ──────────────
-    if (globalBoxId && typeof BoxRegistry !== 'undefined') {
+    //    рисуем один общий бокс под весь текст.
+    //    Per-line opt-out: {LNOBOX} ⇒ lyric.lineStyle.noBox=true ⇒ пропустить.
+    const _noBoxFlag = !!(lyric && typeof lyric === 'object' && lyric.lineStyle && lyric.lineStyle.noBox);
+    if (globalBoxId && !_noBoxFlag && typeof BoxRegistry !== 'undefined') {
       const hasAnySpanBox = spans.some(sp => BoxRegistry.hasBox(sp));
       if (!hasAnySpanBox) {
         const gStyle = BoxRegistry.get(globalBoxId);
@@ -918,7 +950,7 @@ const TextRenderer = (() => {
             row.forEach((sp, idx) => {
               const spSize = sp.big ? fontSize*1.45 : sp.small ? fontSize*0.65 : fontSize;
               const fontStyle = (sp.bold ? 'bold ' : '') + (sp.italic ? 'italic ' : '');
-              ctx.font = `${fontStyle}${spSize}px ${font}`;
+              ctx.font = `${fontStyle}${spSize}px ${font}${EMOJI_FB}`;
               rw += ctx.measureText(sp.word).width;
               if (idx < row.length-1) rw += fontSize*0.35;
             });
@@ -1039,9 +1071,15 @@ const TextRenderer = (() => {
     ctx.shadowBlur=0; ctx.shadowColor='transparent';
     ctx.restore();
 
+    // ── Scroll дубликат: seamless loop ──
+    // scroll_* возвращают _scrollDupe:{dx,dy} — смещение зеркального экземпляра.
+    if (anim && anim._scrollDupe) {
+      const { dx, dy } = anim._scrollDupe;
+      const animDupe = { ...anim, offsetX: offsetX + dx, offsetY: offsetY + dy, _scrollDupe: null };
+      draw(ctx, lyric, cx, cy, animDupe, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId);
+    }
+
     // Возвращаем реальную нижнюю границу текста в canvas-координатах.
-    // Центр последней строки = cy + totalH/2 - lineH/2, её визуальный низ
-    // учитывает scaleY анимации и offsetY от пружин.
     const lastRowCenterY = cy + totalH / 2 - lineH / 2;
     const bottomY = lastRowCenterY + offsetY + (fontSize * scaleY) * 0.55;
     return bottomY;

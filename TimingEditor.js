@@ -13,6 +13,8 @@ const TimingEditor = (() => {
   let pauseOffset = 0;
   let dom = {};
   let isSeeking = false;
+  let seekFraction = 0;
+  let draggingMarker = null;
   let viewMode = 'timed'; // 'timed' or 'all'
   let playbackRate = 1.0; // Скорость воспроизведения
 
@@ -127,24 +129,100 @@ const TimingEditor = (() => {
   function tick() {
     if (!playing) return;
     const t = currentTime();
-    const dur = audioBuffer ? audioBuffer.duration : 1;
-    const p = Math.min(t / dur, 1);
     dom.currentTime.textContent = fmtTime(t);
-    if (!isSeeking) {
-      dom.seekSlider.value = p * 1000;
+    if (!isSeeking && draggingMarker === null) {
+      const dur = audioBuffer ? audioBuffer.duration : 1;
+      seekFraction = Math.min(t / dur, 1);
     }
+    drawSeek();
     requestAnimationFrame(tick);
+  }
+
+  function getCanvasPct(clientX) {
+    const rect = dom.seekCanvas.getBoundingClientRect();
+    return Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+  }
+
+  function findMarkerAt(clientX) {
+    if (!audioBuffer) return -1;
+    const rect = dom.seekCanvas.getBoundingClientRect();
+    const x = clientX - rect.left;
+    for (let i = 0; i < timed.length; i++) {
+      const mx = (timed[i].time / audioBuffer.duration) * rect.width;
+      if (Math.abs(x - mx) <= 7) return i;
+    }
+    return -1;
+  }
+
+  function drawSeek() {
+    const canvas = dom.seekCanvas;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const w = rect.width;
+    const h = rect.height;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const trackY = h / 2;
+    const trackH = 6;
+
+    // Track bg
+    ctx.fillStyle = '#1a1a1a';
+    fillRoundRect(ctx, 0, trackY - trackH / 2, w, trackH, 3);
+
+    if (!audioBuffer) return;
+    const dur = audioBuffer.duration;
+    const p = seekFraction;
+
+    // Progress
+    ctx.fillStyle = '#383838';
+    fillRoundRect(ctx, 0, trackY - trackH / 2, w * p, trackH, 3);
+
+    // Markers
+    timed.forEach((item, i) => {
+      const mx = Math.min(item.time / dur, 1) * w;
+      ctx.fillStyle = draggingMarker === i ? '#fff' : 'rgba(232,255,0,0.85)';
+      fillRoundRect(ctx, mx - 2, trackY - 11, 4, 22, 2);
+    });
+
+    // Thumb
+    ctx.fillStyle = '#e8ff00';
+    ctx.beginPath();
+    ctx.arc(w * p, trackY, 8, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  function fillRoundRect(ctx, x, y, w, h, r) {
+    if (w <= 0) return;
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
   }
 
   /* ── MARK ───────────────────────────────────── */
   function markCurrentLine() {
     if (cursor >= lines.length) return;
     const t = currentTime();
-
     timed.push({ time: t, text: lines[cursor] });
     cursor++;
-    
+
     renderResults();
+    renderMarkers();
     renderCurrentLine();
   }
 
@@ -153,6 +231,7 @@ const TimingEditor = (() => {
     timed.pop();
     cursor = Math.max(0, cursor - 1);
     renderResults();
+    renderMarkers();
     renderCurrentLine();
   }
 
@@ -250,8 +329,9 @@ const TimingEditor = (() => {
         btn.addEventListener('click', () => {
           const idx = +btn.dataset.i;
           timed.splice(idx, 1);
-          cursor = Math.min(cursor, lines.length - 1);
+          cursor = timed.length;
           renderResults();
+          renderMarkers();
           renderCurrentLine();
         });
       });
@@ -290,6 +370,11 @@ const TimingEditor = (() => {
     }
   }
 
+  /* ── MARKERS ────────────────────────────────── */
+  function renderMarkers() {
+    drawSeek();
+  }
+
   /* ── EXPORT ─────────────────────────────────── */
   function exportLRC() {
     if (timed.length === 0) return '';
@@ -323,7 +408,7 @@ const TimingEditor = (() => {
       lyricsInput: document.getElementById('lyricsInput'),
       loadLyricsBtn: document.getElementById('loadLyricsBtn'),
       playBtn: document.getElementById('playBtn'),
-      seekSlider: document.getElementById('seekSlider'),
+      seekCanvas: document.getElementById('seekCanvas'),
       currentTime: document.getElementById('currentTime'),
       totalTime: document.getElementById('totalTime'),
       undoBtn: document.getElementById('undoBtn'),
@@ -391,9 +476,14 @@ const TimingEditor = (() => {
       if (hasTimecodes) {
         // Парсим существующие таймкоды
         const parsed = LRCParser.parse(raw);
-        lines = parsed.map(item => item.text);
-        timed = parsed.map(item => ({ time: item.time, text: item.text }));
-        cursor = lines.length; // Все строки уже размечены
+        // Сохраняем ВСЕ записи в timed (включая [Chorus] и т.д.) для корректного экспорта
+        timed = parsed.map(item => ({ time: item.time, text: item.text, rawText: item.rawText }));
+        // В lines — только строки с реальным текстом (без секционных меток)
+        lines = parsed.filter(item => item.text.trim() !== '').map(item => item.text);
+        // Ставим курсор на первую ещё не размеченную строку
+        const timedTexts = new Set(timed.map(t => t.text));
+        cursor = lines.findIndex(line => !timedTexts.has(line));
+        if (cursor === -1) cursor = lines.length; // все промаркированы → Done!
       } else {
         // Просто загружаем строки без таймкодов
         lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
@@ -403,6 +493,7 @@ const TimingEditor = (() => {
       
       renderCurrentLine();
       renderResults();
+      renderMarkers();
     });
 
     // Transport
@@ -412,23 +503,51 @@ const TimingEditor = (() => {
       else play();
     });
 
-    dom.seekSlider.addEventListener('mousedown', () => {
-      isSeeking = true;
-    });
-
-    dom.seekSlider.addEventListener('mouseup', () => {
-      isSeeking = false;
-      // Применяем финальное значение после отпускания
-      if (audioBuffer) {
-        seek((dom.seekSlider.value / 1000) * audioBuffer.duration);
+    dom.seekCanvas.addEventListener('mousedown', e => {
+      if (!audioBuffer) return;
+      const mi = findMarkerAt(e.clientX);
+      if (mi >= 0) {
+        draggingMarker = mi;
+      } else {
+        isSeeking = true;
+        seekFraction = getCanvasPct(e.clientX);
+        dom.currentTime.textContent = fmtTime(seekFraction * audioBuffer.duration);
+        drawSeek();
       }
     });
 
-    dom.seekSlider.addEventListener('input', () => {
-      if (!audioBuffer || !isSeeking) return;
-      // Обновляем только визуально во время перетаскивания
-      const t = (dom.seekSlider.value / 1000) * audioBuffer.duration;
-      dom.currentTime.textContent = fmtTime(t);
+    dom.seekCanvas.addEventListener('mousemove', e => {
+      if (!audioBuffer) return;
+      const mi = findMarkerAt(e.clientX);
+      dom.seekCanvas.style.cursor = mi >= 0 ? 'ew-resize' : 'pointer';
+    });
+
+    document.addEventListener('mousemove', e => {
+      if (draggingMarker !== null && audioBuffer) {
+        timed[draggingMarker].time = getCanvasPct(e.clientX) * audioBuffer.duration;
+        drawSeek();
+        return;
+      }
+      if (!isSeeking || !audioBuffer) return;
+      seekFraction = getCanvasPct(e.clientX);
+      dom.currentTime.textContent = fmtTime(seekFraction * audioBuffer.duration);
+      drawSeek();
+    });
+
+    document.addEventListener('mouseup', e => {
+      if (draggingMarker !== null) {
+        timed.sort((a, b) => a.time - b.time);
+        draggingMarker = null;
+        renderResults();
+        drawSeek();
+        return;
+      }
+      if (!isSeeking) return;
+      isSeeking = false;
+      if (audioBuffer) {
+        seekFraction = getCanvasPct(e.clientX);
+        seek(seekFraction * audioBuffer.duration);
+      }
     });
 
     dom.undoBtn.addEventListener('click', undoMark);

@@ -26,11 +26,11 @@
    {LSIZE:120}                    — размер шрифта строки
    {LANIM:glitch}                 — режим анимации строки
    {LCOLOR:#ff2d55}               — цвет текста строки
-   {LPOS:top}                     — позиция текста (top/center/bottom)
+   {LPOS:top}                     — позиция текста (top/center/bottom + -left/-right)
 ═══════════════════════════════════════════════ */
 const LRCParser = (() => {
   const LRC_RE = /^\[(\d{1,2}):(\d{2})\.(\d{2,3})\]\s*(.*)$/;
-  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|BGIMG|POS|LAYER|OVFX):[^}]+\}/g;
+  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|BGIMG|POS|LAYER|OVFX|NOBOX):[^}]+\}|\{LNOBOX\}/g;
 
   // Извлекает per-line стиль из rawText
   function extractLineStyle(text) {
@@ -40,9 +40,10 @@ const LRCParser = (() => {
     const animM  = text.match(/\{LANIM:([^}]+)\}/);
     const colorM = text.match(/\{LCOLOR:(#[0-9a-fA-F]{3,6})\}/);
     const bgImgM = text.match(/\{LBGIMG:([^}]+)\}/);
-    const posM   = text.match(/\{LPOS:(top|center|bottom)\}/i);
+    const posM   = text.match(/\{LPOS:(top-left|top-right|top|center-left|center-right|center|bottom-left|bottom-right|bottom)\}/i);
     const layerM = text.match(/\{LLAYER:(above|below)\}/i);
     const ovfxM  = text.match(/\{LOVFX:(static|sway|pulse|stretch|float|shake|bounce|spin)\}/i);
+    const noBoxM = text.match(/\{LNOBOX\}/i);
     if (fontM)  ls.font       = fontM[1].trim();
     if (sizeM)  ls.fontSize   = parseInt(sizeM[1], 10);
     if (animM)  ls.animMode   = animM[1].trim();
@@ -51,6 +52,7 @@ const LRCParser = (() => {
     if (posM)   ls.position   = posM[1].toLowerCase();
     if (layerM) ls.layer      = layerM[1].toLowerCase();
     if (ovfxM)  ls.overlayEffect = ovfxM[1].toLowerCase();
+    if (noBoxM) ls.noBox      = true;
     return ls;
   }
 
@@ -85,18 +87,19 @@ const LRCParser = (() => {
         commands.push({ type: 'blur', value: false });
       }
       if (cmd.includes('LETTERBOX')) {
-        if (cmd.includes('REACTIVE')) {
-          if (cmd.includes('OFF')) {
-            commands.push({ type: 'letterboxReactive', value: false });
-          } else {
-            commands.push({ type: 'letterboxReactive', value: true });
-          }
+        // Унифицированная семантика: один тег = одно состояние.
+        //   /LETTERBOX OFF/         → bars off, reactive off
+        //   /LETTERBOX REACTIVE/    → bars on, reactive on
+        //   /LETTERBOX/             → bars on, reactive off
+        if (cmd.includes('OFF')) {
+          commands.push({ type: 'letterbox', value: false });
+          commands.push({ type: 'letterboxReactive', value: false });
+        } else if (cmd.includes('REACTIVE')) {
+          commands.push({ type: 'letterbox', value: true });
+          commands.push({ type: 'letterboxReactive', value: true });
         } else {
-          if (cmd.includes('OFF')) {
-            commands.push({ type: 'letterbox', value: false });
-          } else {
-            commands.push({ type: 'letterbox', value: true });
-          }
+          commands.push({ type: 'letterbox', value: true });
+          commands.push({ type: 'letterboxReactive', value: false });
         }
       }
 
@@ -104,6 +107,9 @@ const LRCParser = (() => {
       if (cmd === 'ZOOM IN')   commands.push({ type: 'zoomIn'   });
       if (cmd === 'ZOOM OUT')  commands.push({ type: 'zoomOut'  });
       if (cmd === 'ZOOM STOP') commands.push({ type: 'zoomStop' });
+      // Per-line сила зума: /ZOOM AMT 0.7/
+      const amtMatch = cmd.match(/^ZOOM AMT (\d*\.?\d+)$/);
+      if (amtMatch) commands.push({ type: 'zoomAmount', value: parseFloat(amtMatch[1]) });
 
       // ── Команды камеры: прокрутка ─────────────
       if (cmd === 'SCROLL LEFT')  commands.push({ type: 'scrollLeft'  });

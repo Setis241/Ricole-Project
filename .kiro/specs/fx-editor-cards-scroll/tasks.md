@@ -1,0 +1,86 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Scrollbar Activation for Overflow
+  - **CRITICAL**: This test MUST FAIL on unfixed code - failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior - it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the bug exists
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases: multiple object cards (5+) where total height exceeds visible area
+  - Test that when objectCardsCount > 0 AND totalCardsHeight > visibleAreaHeight, the scrollbar activates and all cards are accessible
+  - Manually test by adding 5, 10, and 15 overlay objects in the FX editor's "ОБЪЕКТЫ" tab
+  - Use browser DevTools to inspect `.fxe-ov-list`, `.fxe-ov-left`, and `.fxe-ov-content` computed CSS properties
+  - Verify which container lacks proper flex constraints (likely `.fxe-ov-content` missing `min-height:0`)
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (scrollbar does not activate, bottom cards are inaccessible)
+  - Document counterexamples found: specific number of cards where scrolling fails, CSS property values from DevTools
+  - _Requirements: 2.1, 2.2, 2.3, 2.4_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Card Interaction Behavior
+  - **IMPORTANT**: Follow observation-first methodology
+  - Observe behavior on UNFIXED code for non-scrolling interactions:
+    - Card collapse/expand functionality
+    - Parameter editing (position, size, opacity, effects)
+    - Card deletion
+    - Z-order buttons (⬆/⬇)
+    - Adding new objects
+    - No scrollbar when 1-2 cards fit in visible area
+  - Write property-based tests capturing observed behavior patterns:
+    - For any card collapse/expand action, verify card state changes correctly
+    - For any parameter edit, verify preview canvas updates correctly
+    - For any delete action, verify card is removed from list
+    - For any z-order change, verify card position in list updates
+    - For any add object action, verify new card appears in list
+    - For 1-2 cards that fit in visible area, verify no scrollbar appears
+  - Property-based testing generates many test cases for stronger guarantees
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
+
+- [x] 3. Fix for FX editor cards scroll
+
+  - [x] 3.1 Implement the fix
+    - Open `FxEditor.js` and locate the CSS section (around line 1097-1101)
+    - Find the `.fxe-ov-content` CSS rule (currently: `flex:1;display:flex;gap:0;overflow:hidden;`)
+    - Add `min-height:0;` to the `.fxe-ov-content` rule to enable proper flex shrinking
+    - Verify `.fxe-ov-left` already has `min-height:0` (should be present at line 1101)
+    - If adding `min-height:0` to `.fxe-ov-content` doesn't work, check for CSS specificity issues or try adding explicit `height:0`
+    - _Bug_Condition: isBugCondition(input) where input.objectCardsCount > 0 AND input.totalCardsHeight > input.visibleAreaHeight AND NOT input.scrollbarActivated AND input.parentContainer === '.fxe-ov-left' AND NOT input.parentHasMinHeight0_
+    - _Expected_Behavior: For all UI states where total cards height exceeds visible area, scrollbar SHALL activate and all cards SHALL be accessible_
+    - _Preservation: All card interactions (collapse, edit, delete, z-order, add) SHALL work exactly as before; no scrollbar when cards fit in visible area_
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
+
+  - [x] 3.2 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Scrollbar Activation for Overflow
+    - **IMPORTANT**: Re-run the SAME test from task 1 - do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied
+    - Add 5, 10, and 15 overlay objects in the FX editor's "ОБЪЕКТЫ" tab
+    - Verify scrollbar activates when cards exceed visible area
+    - Verify all cards are accessible by scrolling to the bottom
+    - Use browser DevTools to confirm `.fxe-ov-content` now has `min-height:0`
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4_
+
+  - [x] 3.3 Verify preservation tests still pass
+    - **Property 2: Preservation** - Card Interaction Behavior
+    - **IMPORTANT**: Re-run the SAME tests from task 2 - do NOT write new tests
+    - Run preservation property tests from step 2:
+      - Card collapse/expand still works
+      - Parameter editing still works
+      - Card deletion still works
+      - Z-order buttons still work
+      - Adding objects still works
+      - No scrollbar when 1-2 cards fit in visible area
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix (no regressions)
+    - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6_
+
+- [x] 4. Checkpoint - Ensure all tests pass
+  - Verify bug condition test passes (scrollbar activates for overflow)
+  - Verify preservation tests pass (card interactions unchanged)
+  - Test edge cases: 1-2 cards (no scrollbar), 5 cards (scrollbar), 15 cards (scrollbar)
+  - Test tab switching: verify scrollbar persists when switching between ТЕКСТ and ОБЪЕКТЫ tabs
+  - If any issues arise, ask the user for guidance

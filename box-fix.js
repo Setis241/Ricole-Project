@@ -374,7 +374,6 @@
         if (span.blur) ctx.filter = 'none';
       }
 
-      console.log('[box-fix] TextRenderer.draw патчен ✓');
     }
 
     // ─────────────────────────────────────────────
@@ -455,7 +454,6 @@
             document.head.appendChild(dynStyle2);
           }
 
-          console.log(`[box-fix] FxEditor: добавлено ${missing.length} кнопок боксов ✓`);
         }, 50);
       };
     }
@@ -465,8 +463,6 @@
     // BOX_STYLES напрямую, работает корректно ✓
     // ─────────────────────────────────────────────
 
-    console.log(`[box-fix] Патч применён: ${ALL_IDS.length} боксов зарегистрировано ✓`);
-    console.log('[box-fix] ID боксов:', ALL_IDS.join(', '));
   }
 
   if (document.readyState === 'loading') {
