@@ -1092,20 +1092,28 @@ const TextRenderer = (() => {
      Из двух свободных сторон берём широкую. Если персонаж съедает почти всю
      зону, маска отключается: лучше текст поверх героя, чем нечитаемая
      колонка в два символа шириной. */
-  function maskedArea(area, shapeAt, cy, fontSize) {
+  function maskedArea(area, shapeAt, cy, blockH) {
     if (typeof shapeAt !== 'function') return area;
 
-    const band = Math.max(fontSize * 1.6, area.h * 0.18);
+    /* Полоса — реальная высота блока с запасом: строка ещё будет двигаться
+       по вертикали (клампинг центра, offsetY, дыхание кегля), и профиль,
+       снятый впритык, промахнётся на плечо. Проб много и берётся ХУДШИЙ
+       случай: одна проба у головы — это и есть «маска вроде есть, а текст
+       на ней лежит». */
+    const band = Math.max(blockH * 1.35, area.h * 0.12);
     let x0 = Infinity, x1 = -Infinity;
-    for (let i = 0; i < 7; i++) {
-      const sp = shapeAt(cy - band / 2 + band * (i / 6));
+    const N = 15;
+    for (let i = 0; i < N; i++) {
+      const sp = shapeAt(cy - band / 2 + band * (i / (N - 1)));
       if (!sp) continue;
       x0 = Math.min(x0, sp.x0); x1 = Math.max(x1, sp.x1);
     }
     if (!(x0 < Infinity)) return area;   // на этой высоте персонажа нет
 
     const R = area.x + area.w;
-    const gap    = area.w * 0.02;        // воздух между текстом и силуэтом
+    // Воздух до силуэта: у крупного кегля обводка и тень заметно шире буквы,
+    // поэтому зазор растёт вместе с блоком, а не остаётся долей ширины кадра.
+    const gap    = Math.max(area.w * 0.02, blockH * 0.12);
     const leftW  = Math.max(0, Math.min(x0, R) - area.x - gap);
     const rightW = Math.max(0, R - Math.max(x1, area.x) - gap);
 
@@ -1169,13 +1177,26 @@ const TextRenderer = (() => {
     // area — внутренняя область рамки (или весь холст, если рамок нет).
     // Перенос строк, авто-уменьшение шрифта и клампинг центра считаются
     // относительно неё, поэтому куплет не вылезает за пределы кадра.
-    const area     = maskedArea(resolveArea(bounds, canvasWidth), shapeAt, cy, fontSize);
+    const maxPossibleScale = 2.2;
+    const spans    = parseSpans(text, color, t);
+
+    /* Маску считаем в два прохода. Профиль фигуры меряется по ВЫСОТЕ БЛОКА,
+       а высота известна только после переноса — который сам зависит от
+       ширины, то есть от маски. Один проход по полосе вокруг cy давал ровно
+       то, что видно на кадре: у головы силуэт узкий, строка меряется по
+       нему и спокойно заезжает на плечи. Поэтому: черновой перенос по
+       незамаскированной зоне ради высоты — и только потом настоящая маска. */
+    const areaFull = resolveArea(bounds, canvasWidth);
+    let blockH = fontSize * 1.6;
+    {
+      const mw0 = (areaFull.w - areaFull.w*0.04*2) / maxPossibleScale;
+      blockH = wrapSpans(ctx, spans, mw0, fontSize, font).length * fontSize * 1.6;
+    }
+    const area     = maskedArea(areaFull, shapeAt, cy, blockH);
     const padding  = area.w*0.04;
     // Учитываем максимальный возможный scaleX (обычно до 2.2x), чтобы текст не вылезал за границы
     // но при этом не перестраивался во время анимации
-    const maxPossibleScale = 2.2;
     const maxWidth = (area.w - padding*2) / maxPossibleScale;
-    const spans    = parseSpans(text, color, t);
 
     // Подбор размера: если строк столько, что блок не влезает в высоту зоны —
     // уменьшаем шрифт (до 45% от исходного) и переносим заново.

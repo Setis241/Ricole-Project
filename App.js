@@ -425,7 +425,7 @@ const App = (() => {
             textX, trY,
             trAnim, _fadeA,
             params.translationColor, _effectiveFont, trSize, cw, t,
-            null, safe
+            null, safe, _shapeAt
           );
         }
       }
