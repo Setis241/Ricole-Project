@@ -7368,11 +7368,16 @@ const FxEditor = (() => {
     const t = performance.now() / 1000;
     
     try {
+      // Предпросмотр тоже уважает внутреннюю область кадра
+      const safe = (typeof BackgroundEngine !== 'undefined' && BackgroundEngine.getTextSafeArea)
+        ? BackgroundEngine.getTextSafeArea(w, h)
+        : { x: 0, y: 0, w, h };
       TextRenderer.draw(
         ctx, tempLyric,
-        w / 2, h / 2,
+        safe.x + safe.w / 2, safe.y + safe.h / 2,
         anim, fadeAlpha,
-        effectiveColor, effectiveFont, effectiveSize, w, t
+        effectiveColor, effectiveFont, effectiveSize, w, t,
+        null, safe
       );
     } catch(e) {
       console.error('Preview render error:', e);

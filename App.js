@@ -259,21 +259,27 @@ const App = (() => {
         // X: 0.15 / 0.50 / 0.85 от ширины
         // Y: 0.15 / 0.50 / 0.85 от высоты
         // legacy: 'top'/'center'/'bottom' = центральная колонка
-        let textX = cw / 2;
-        let textY = ch / 2;
+        // Сетка считается ОТНОСИТЕЛЬНО внутренней области кадра (рамки),
+        // а не всего холста — иначе текст ложится прямо под рамку.
+        const safe = BackgroundEngine.getTextSafeArea
+          ? BackgroundEngine.getTextSafeArea(cw, ch)
+          : { x: 0, y: 0, w: cw, h: ch };
+
+        let textX = safe.x + safe.w / 2;
+        let textY = safe.y + safe.h / 2;
         const p = _effectivePos || 'center';
-        if (p.endsWith('-left'))  textX = cw * 0.15;
-        if (p.endsWith('-right')) textX = cw * 0.85;
-        if (p.startsWith('top'))    textY = ch * 0.15;
-        if (p.startsWith('bottom')) textY = ch * 0.85;
-        // explicit 'top' / 'bottom' (без -left/-right) — центрированы по X (textX=cw/2 default)
+        if (p.endsWith('-left'))  textX = safe.x + safe.w * 0.15;
+        if (p.endsWith('-right')) textX = safe.x + safe.w * 0.85;
+        if (p.startsWith('top'))    textY = safe.y + safe.h * 0.15;
+        if (p.startsWith('bottom')) textY = safe.y + safe.h * 0.85;
+        // explicit 'top' / 'bottom' (без -left/-right) — центрированы по X
 
         const mainBottom = TextRenderer.draw(
           ctx, _lyric,
           textX, textY,
           _animResult, _fadeA,
           _effectiveColor, _effectiveFont, _effectiveSize, cw, t,
-          params.globalBoxId
+          params.globalBoxId, safe
         );
 
         // ── Перевод строки ──────────────────────
@@ -286,7 +292,8 @@ const App = (() => {
             ctx, { text: _lyric.translation },
             textX, trY,
             trAnim, _fadeA,
-            params.translationColor, _effectiveFont, trSize, cw, t
+            params.translationColor, _effectiveFont, trSize, cw, t,
+            null, safe
           );
         }
       }
