@@ -54,7 +54,12 @@ const App = (() => {
     window.RicoleDebug = function() {
       const g = (typeof TextRenderer !== 'undefined') ? TextRenderer.lastFrameGuard : null;
       if (!_debugSnap) return 'кадр с текстом ещё не рисовался — включи воспроизведение';
-      return Object.assign({}, _debugSnap, { страховкаКадра: g });
+      const j = (typeof TextRenderer !== 'undefined') ? TextRenderer.ghostJumps : null;
+      return Object.assign({}, _debugSnap, {
+        страховкаКадра: g,
+        // Скачки фонового слоя: что именно дёрнулось и на смене ли строки.
+        скачкиФона: j && j.length ? j : 'скачков не зафиксировано',
+      });
     };
   }
 
@@ -394,7 +399,7 @@ const App = (() => {
       ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t, FOREGROUND_CAM)
       : false;
 
-    BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, () => {
+    BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, (pass) => {
       // ── Text ──────────────────────────────────
       if (_lyric && _animResult) {
         // 9-позиционная сетка: top/center/bottom × left/center/right
@@ -411,8 +416,13 @@ const App = (() => {
           textX, textY,
           _animResult, _fadeA,
           _effectiveColor, _effectiveFont, _effectiveSize, cw, t,
-          params.globalBoxId, safe, _shapeAt
+          params.globalBoxId, safe, _shapeAt, pass
         );
+
+        /* Перевод — часть читаемого набора, а не декорация: в ghost-проходе
+           его рисовать нельзя, иначе он ляжет под фигуру и продублируется
+           вторым проходом. */
+        if (pass === 'ghost') return;
 
         // ── Перевод строки ──────────────────────
         if (params.showTranslation && _lyric.translation) {

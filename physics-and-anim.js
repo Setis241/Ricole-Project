@@ -109,6 +109,10 @@ class SpringPhysics {
  *
  * Возвращает 0..1 (smoothstep).
  */
+/* Сглаженная резкость подложки backdrop. Состояние живёт между кадрами:
+   мгновенный бас даёт рваное мигание, а нужно дыхание. */
+let _bdSoft = 0;
+
 function _bassGate(bassOver, threshold, width = 0.12) {
   const p = (bassOver - threshold) / width;
   if (p <= 0) return 0;
@@ -2950,6 +2954,150 @@ const AnimModes = {
   },
 
   /* ═══════════════════════════════════════════════
+     RIFT — «Разлом»
+     Режим бриджа. Бридж — единственное место, где текст остаётся в кадре
+     один (фигура уходит на край), и здесь набор обязан работать сам, а не
+     ждать помощи от фона.
+
+     Строки блока идут ВСТРЕЧНО: чётная приходит слева и продолжает уходить
+     влево, нечётная — справа и вправо. Блок не «выкладывается и замирает»,
+     как это делают tracking/headline, а всё время разъезжается по шву — и
+     при этом остаётся читаемым, потому что расходятся ЦЕЛЫЕ СТРОКИ по
+     горизонтали, а не буквы во все стороны. Одновременно раскрывается
+     межстрочный зазор: шов идёт по центру блока и растёт вместе с ним.
+
+     Разъезд ограничен: строка не уходит дальше края своей полосы (см. lim),
+     иначе к концу длинного бриджа текст просто вылезал бы за кадр.
+
+     Ghost-строка — тот же ряд крупным кеглем, идущий в ПРОТИВОХОД своей
+     строке. Она даёт вторую скорость и глубину, а не второй текст: alpha
+     низкая, и рисуется она под набором (ghost:true, стоит в массиве раньше).
+     Один дубль на ряд — бюджет отрисовки остаётся пословным.
+
+     Бас раскрывает разрядку внутри строки и подталкивает разъезд — на
+     тихом месте шов почти стоит, на плотном расходится заметно.
+  ═══════════════════════════════════════════════ */
+  rift(o) {
+    const { bands, t, params, words, canvasW, canvasH,
+            elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn } = o;
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+
+    const widths  = _measureWordsPx(ctx, words, fontSize, font);
+    const wordGap = fontSize * 0.40;
+    const band    = _measureBand(maxLineWIn, canvasW);
+    const { lines, lineOf, posInLine, lineW, numLines } = _wrapWords(widths, wordGap, band);
+
+    const bassOver = Math.max(0, bands.bass - 0.28) * params.bassSens;
+    const gate     = _bassGate(bassOver, 0.10);
+
+    /* Зазор раскрывается по ходу строки: блок дышит вертикально, но
+       стартует от нормального шага — иначе первый кадр уже развален. */
+    const life    = duration > 0.4 ? Math.min(elapsed / duration, 1) : 1;
+    const baseGap = _lineStep(numLines, fontSize, canvasH, 1.22);
+    const lineGap = baseGap * (1 + life * 0.16 + bassOver * 0.05 * gate);
+    const totalH  = lineGap * (numLines - 1);
+
+    // Финальные X внутри строки (центрированная выключка)
+    const xIn = new Array(n);
+    lines.forEach((idxs, li) => {
+      let cursor = -lineW[li] / 2;
+      idxs.forEach((idx) => {
+        xIn[idx] = cursor + widths[idx] / 2;
+        cursor += widths[idx] + wordGap;
+      });
+    });
+
+    /* Сторона строки. Нечётная — вправо, чётная — влево. При одной строке
+       в блоке разъезжаться не с кем, поэтому она идёт от варианта фразы:
+       иначе однострочный бридж всегда полз бы в одну и ту же сторону. */
+    const V = _variantOf(words, 2);
+    const dirOf = (li) => (numLines > 1 ? (li % 2 ? 1 : -1) : (V ? 1 : -1));
+
+    const wl = [];
+
+    /* ── Ghost: встречная тень строки ── */
+    const gScale = Math.min(2.4, (canvasH * 0.30) / fontSize);
+    const gFade  = Math.min(elapsed / 0.5, 1);
+    lines.forEach((idxs, li) => {
+      const dir  = -dirOf(li);                       // противоход своей строке
+      const rowY = -totalH / 2 + li * lineGap + fontSize * 0.06;
+      const travel = (life * 0.10 + bassOver * 0.04 * gate) * canvasW * dir;
+      idxs.forEach((idx) => {
+        const gx = xIn[idx] * gScale + travel;
+        const halfW = widths[idx] * gScale / 2;
+        // За кадром не рисуем — чистая экономия проходов.
+        if (gx + halfW < -canvasW || gx - halfW > canvasW) return;
+        wl.push({
+          ghost: true,
+          word:  words[idx],
+          x:     gx,
+          y:     rowY,
+          scale: gScale,
+          alpha: gFade * 0.10,
+          rotation: 0,
+        });
+      });
+    });
+
+    // Разрядка внутри строки: на басу набор раскрывается от центра строки.
+    // Множитель ОДИН на весь блок — он и должен менять только промежутки.
+    const spread = 1 + bassOver * 0.06 * gate;
+
+    /* ── Разъезд считается НА СТРОКУ, а не на слово ──
+       Здесь была прямая ошибка. Место до края полосы у каждого слова своё
+       (крайнее упирается раньше центрального), очередь заезда — тоже своя.
+       Слова получали РАЗНЫЙ сдвиг и наезжали друг на друга: «Yarrick» и
+       «stood» слипались в «Yarrstood». Строка обязана ехать целиком —
+       иначе это не ход строки, а расползание.
+
+       Место берём по самому стеснённому слову строки, ход — по её общей
+       готовности (когда приехало последнее слово). Тогда промежутки внутри
+       строки не меняются вообще, а разъезжаются строки друг относительно
+       друга — то, ради чего режим и сделан. */
+    const target = (life * 0.16 + bassOver * 0.10 * gate) * band;
+    const driftOf = [], easeLineOf = [];
+    lines.forEach((idxs, li) => {
+      let room = Infinity;
+      idxs.forEach((idx) => {
+        const r = band * 0.5 - (Math.abs(xIn[idx] * spread) + widths[idx] * 0.5);
+        if (r < room) room = r;
+      });
+      driftOf[li] = Math.min(Math.max(0, room), target) * dirOf(li);
+      const pLine = Math.min(Math.max(0, elapsed - li * 0.10 - (idxs.length - 1) * 0.045) / 0.42, 1);
+      easeLineOf[li] = 1 - Math.pow(1 - pLine, 4);
+    });
+
+    /* ── Набор ── */
+    words.forEach((word, i) => {
+      const li  = lineOf[i];
+      const cnt = lines[li].length;
+      const dir = dirOf(li);
+
+      // Заезд: строка приходит целиком со своей стороны, слова — по очереди
+      // от ближнего края, поэтому вход читается как ход строки, а не как
+      // осыпание слов.
+      const order = dir > 0 ? (cnt - 1 - posInLine[i]) : posInLine[i];
+      const p     = Math.min(Math.max(0, elapsed - li * 0.10 - order * 0.045) / 0.42, 1);
+      const eased = 1 - Math.pow(1 - p, 4);
+      const enter = (1 - eased) * dir * band * 0.55;
+
+      const xSpread = xIn[i] * spread;
+
+      wl.push({
+        word,
+        x: xSpread + enter + driftOf[li] * easeLineOf[li],
+        y: -totalH / 2 + li * lineGap,
+        scale: 0.94 + eased * 0.06,
+        alpha: Math.min(p * 2.4, 1),
+        rotation: 0,
+      });
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
      RAGGED — «Рваный набор»
      Флаговый набор влево с висячим отступом: строки не выровнены по центру,
      а стоят лесенкой с чередующимся отступом — так верстают выноски и
@@ -3153,7 +3301,20 @@ const AnimModes = {
     const rest = [];
     for (let i = 1; i < n; i++) rest.push(i);
 
-    const SMALL = 0.46;
+    /* Кегль мелкого блока. Было жёстко 0.46 базового — и это ровно то, из-за
+       чего подпись под героем не читалась. Базовый кегль плакату и так
+       занижен подгонкой (герой должен влезть в полосу), а 0.46 от уже
+       заниженного даёт на 1080p строку в 25–30 px: на экране телефона это
+       нечитаемо, и вся строка держится на одном слове-герое.
+
+       Иерархию в плакате создаёт РАЗНИЦА кеглей, а она тут кратная:
+       герой крупнее подписи в три-пять раз в любом случае. Поэтому нижний
+       предел ставим от КАДРА: 4.8% высоты — это порядок обычного субтитра
+       (на 1080p ≈52 px), то есть заведомо читаемо на телефоне. Верхний —
+       0.9 базового, чтобы подпись не подошла к герою вплотную и не
+       превратила плакат в две обычные строки. Иерархия от этого не
+       страдает: герой всё равно крупнее подписи в разы. */
+    const SMALL = Math.min(0.90, Math.max(0.62, (canvasH * 0.048) / Math.max(fontSize, 1)));
     const sw    = rest.map(i => widths[i] * SMALL);
     const sGap  = fontSize * SMALL * 0.55;
 
@@ -3334,28 +3495,53 @@ const AnimModes = {
     const widths = _measureWordsPx(ctx, words, fontSize, font);
     const band   = _measureBand(maxLineWIn, canvasW);
 
-    /* ── Подложка ──
-       Число рядов подбирается по количеству слов: фраза должна лечь в
-       кадр примерно квадратом, иначе на длинной строке подложка выходит
-       узкой лентой, а на короткой — одной строкой в полкадра. */
-    const rowsTarget = Math.max(1, Math.min(4, Math.round(Math.sqrt(n * 0.9))));
-    const totalW = widths.reduce((a, b) => a + b, 0) + fontSize * 0.4 * (n - 1);
-    const gWrap  = _wrapWords(widths, fontSize * 0.4, Math.max(totalW / rowsTarget, Math.max.apply(null, widths)));
-    const gMaxW  = Math.max.apply(null, gWrap.lineW);
+    /* ── Подложка: стена повторов ──
+       Один огромный дубль фразы — это просто вторая строка покрупнее: он
+       спорит с передним набором и ничего не добавляет. Фишка здесь в
+       НАВЯЗЧИВОСТИ: фраза повторена по всему кадру рядами, как штамп или
+       мысль, которая не отпускает. Ряды идут со сбивкой по горизонтали
+       (кирпичная кладка), медленно ползут и дышат на басу.
 
-    /* Кегль подложки: самый широкий ряд встаёт РОВНО в кадр. Было 1.12 —
-       подложка стартовала уже обрезанной, а наезд добавлял сверху ещё 7%,
-       итого пятая часть фразы жилась за краем. За кадр она теперь выходит
-       только по ходу наезда, и это читается как движение камеры, а не как
-       вылезший текст. */
-    const BLEED  = 1.0;
-    let gScale   = (canvasW * BLEED) / Math.max(gMaxW, 1);
-    const gRowH0 = fontSize * 1.02;
-    if (gRowH0 * gScale * gWrap.numLines > canvasH * 1.05) {
-      gScale = (canvasH * 1.05) / (gRowH0 * gWrap.numLines);
+       Кегль подложки задаём ОТ КАДРА, а не от длины фразы. Если считать
+       его от фразы, короткая строка («Я», «Стой») раздувается на весь
+       экран в один-единственный дубль — ровно то, от чего уходим. Высота
+       кадра делит ghost-кегль так, что в кадр всегда встают и ряды, и
+       повторы в ряду, сколько бы слов ни было. */
+    const phraseW = widths.reduce((a, b) => a + b, 0) + fontSize * 0.4 * (n - 1);
+
+    /* Стена меряется ОТ КАДРА, а не от строки. Раскладка ведётся в
+       координатах от точки текста (originX/originY), и если строка стоит
+       не по центру — а она почти всегда стоит не по центру, потому что
+       уступает место фигуре, — то симметричная стена оставляет пустую
+       полосу с одного края кадра. Здесь считаем, сколько кадра лежит
+       слева/сверху от точки строки, и кроем именно это. */
+    const ox = (o.originX !== undefined) ? o.originX : canvasW / 2;
+    const oy = (o.originY !== undefined) ? o.originY : canvasH / 2;
+    const left = -ox, top = -oy;
+    const right = canvasW - ox, bottom = canvasH - oy;
+
+    /* Кегль подложки задаём ОТ КАДРА, а не от длины фразы. Если считать
+       его от фразы, короткая строка («Я», «Стой») раздувается на весь
+       экран в один-единственный дубль — ровно то, от чего уходим. */
+    let gScale = Math.min((canvasH * 0.155) / fontSize,
+                          (canvasW * 0.80) / Math.max(phraseW, 1));
+
+    /* Бюджет. Каждый ghost — отдельный fillText на кадр, и стена из
+       трёхсот слов кладёт композицию так же надёжно, как размытие.
+       Но покрытие кадра важнее плотности: при перерасходе НЕ обрезаем
+       стену по краям, а укрупняем кегль — повторов становится меньше,
+       кадр по-прежнему закрыт целиком. */
+    const GHOST_BUDGET = 150;
+    let gStepX, gRowH, perRow, rows;
+    for (let guard = 0; guard < 12; guard++) {
+      gStepX = (phraseW + fontSize * 1.6) * gScale;
+      gRowH  = fontSize * 1.30 * gScale;
+      perRow = Math.ceil((right - left) / gStepX) + 2;
+      rows   = Math.ceil((bottom - top) / gRowH) + 2;
+      if (rows * perRow * n <= GHOST_BUDGET) break;
+      gScale *= 1.18;
     }
-    const gRowH = gRowH0 * gScale;
-    const gTop  = -gRowH * (gWrap.numLines - 1) / 2;
+    const gTop = top - gRowH;
 
     // Медленный наезд на всю длительность строки — кино, а не анимация:
     // движение не должно заканчиваться раньше, чем строка сменится.
@@ -3364,37 +3550,81 @@ const AnimModes = {
     const gFade = Math.min(elapsed / 0.55, 1);
     const bassOver = Math.max(0, bands.bass - 0.28) * params.bassSens;
 
+    /* Жизнь подложки — медленный «вдох» на басу.
+       Размытие здесь пробовать нельзя: ctx.filter='blur()' на глифах во
+       весь кадр пересчитывает гаусс на КАЖДОЕ слово и КАЖДЫЙ кадр, и
+       композиция встаёт колом. Поэтому расплывание изображаем масштабом и
+       прозрачностью — это бесплатно. Огибающая сглажена (атака 0.10,
+       отпускание 0.04): подложка дышит, а не дёргается на каждой бочке. */
+    const bdTarget = Math.min(1, bassOver * 2.2);
+    _bdSoft += (bdTarget - _bdSoft) * (bdTarget > _bdSoft ? 0.10 : 0.04);
+    const soft   = _bdSoft;
+    const spread = 1 + soft * 0.030;
+
     const wl = [];
-    gWrap.lines.forEach((idxs, li) => {
-      let w = 0;
-      idxs.forEach((k, j) => { w += widths[k] + (j ? fontSize * 0.4 : 0); });
-      let cursor = -w / 2;
-      idxs.forEach((k) => {
-        wl.push({
-          ghost: true,
-          word:  words[k],
-          x:     (cursor + widths[k] / 2) * gScale * push,
-          y:     (gTop + li * gRowH) * push,
-          scale: gScale * push,
-          alpha: gFade * (0.13 + bassOver * 0.09 * _bassGate(bassOver, 0.12)),
-          rotation: 0,
-        });
-        cursor += widths[k] + fontSize * 0.4;
-      });
-    });
+    // Медленный сквозной прополз: стена живёт сама по себе и не привязана
+    // к смене строки, поэтому повтор не выглядит нарезкой на такты.
+    const crawl = (t * gRowH * 0.06) % gRowH;
+
+    for (let li = 0; li < rows; li++) {
+      const rowY = (gTop + li * gRowH + crawl) * push * spread;
+      // Сбивка ряда: без неё повторы встают колонками и стена читается
+      // как таблица. Смещение детерминированное — по номеру ряда, иначе
+      // кладка прыгала бы на каждом кадре.
+      const brick = ((li * 0.37) % 1) * gStepX;
+      /* Встречный ход рядов. Раньше стена только медленно ползла вверх —
+         все ряды одной скоростью в одну сторону, то есть картинка целиком,
+         и движения в ней не читалось: это была текстура, а не слой.
+         Соседние ряды идут в разные стороны — между ними появляется срез,
+         глаз цепляется за расхождение, и стена оживает, не мешая набору.
+         Скорость мала (шаг повтора примерно за 11 с) и постоянна: рывок от
+         баса здесь читался бы дребезгом, а не пульсом.
+         Смещение берём по модулю шага — покрытие кадра не рвётся, потому
+         что ряд отрисован с запасом в два повтора с каждой стороны. */
+      const rowDir  = (li % 2) ? 1 : -1;
+      const rowSlide = (((t * gStepX / 11) * rowDir) % gStepX + gStepX) % gStepX;
+      // Ряды неодинаковой плотности: часть почти не видна, часть заметнее.
+      // Ровная стена читается как обои, неровная — как наваждение.
+      const rowA  = 0.62 + 0.38 * Math.abs(Math.sin(li * 2.1 + 0.7));
+
+      for (let rep = 0; rep < perRow; rep++) {
+        // Сбивку и ход складываем ПО МОДУЛЮ шага: иначе суммарное смещение
+        // доходит до двух шагов и слева открывается непокрытая полоса.
+        let cursor = left - gStepX + ((brick + rowSlide) % gStepX) + rep * gStepX;
+        for (let k = 0; k < n; k++) {
+          const wx = cursor + widths[k] * gScale / 2;
+          cursor += (widths[k] + fontSize * 0.4) * gScale;
+          // За кадром не рисуем вовсе — это чистая экономия проходов.
+          const halfW = widths[k] * gScale / 2;
+          if (wx + halfW < left || wx - halfW > right) continue;
+          wl.push({
+            ghost: true,
+            word:  words[k],
+            x:     wx,
+            y:     rowY,
+            scale: gScale * push * spread,
+            // Яркость почти не трогаем: подложка не должна вспыхивать и
+            // спорить с передним набором. Пульс ушёл в масштаб.
+            alpha: gFade * rowA * (0.11 + soft * 0.05),
+            rotation: 0,
+          });
+        }
+      }
+    }
 
     /* ── Передний набор ──
        Он и есть то, что читают, поэтому стоит по центру обычным кеглем.
        Смещение от центра кадра — по варианту: подложка симметрична, и если
        текст всегда стоит ровно посередине, кадр получается зеркальным и
        мёртвым. */
-    const V     = _variantOf(words, 3);
-    const shift = (V === 0) ? 0 : (V === 1 ? -1 : 1) * canvasH * 0.17;
+    const V = _variantOf(words, 3);
 
     const wordGap = fontSize * 0.42;
     const fWrap   = _wrapWords(widths, wordGap, band);
     const lineGap = _lineStep(fWrap.numLines, fontSize, canvasH, 1.24);
     const totalH  = lineGap * (fWrap.numLines - 1);
+
+    const shift = (V === 0) ? 0 : (V === 1 ? -1 : 1) * canvasH * 0.17;
 
     const xF = new Array(n), yF = new Array(n);
     fWrap.lines.forEach((idxs, li) => {
@@ -3413,6 +3643,21 @@ const AnimModes = {
         cursor += widths[idx] + wordGap;
       });
     });
+
+    /* Просвет под читаемый текст.
+       Стена идёт через весь кадр, поэтому «встать между рядами» уже нельзя
+       — их некуда раздвинуть. Вместо этого гасим стену полосой на высоте
+       переднего набора: получается не дыра, а провал плотности, и строка
+       читается, не перебивая наваждение вокруг. Полоса с мягкими краями,
+       иначе виден прямоугольник. */
+    const bandHalf = totalH / 2 + lineGap * 0.62;
+    for (const g of wl) {
+      if (!g.ghost) continue;
+      const d = Math.abs(g.y - shift);
+      if (d >= bandHalf) continue;
+      const k = d / bandHalf;              // 0 в центре полосы, 1 на краю
+      g.alpha *= 0.18 + 0.82 * (k * k);
+    }
 
     words.forEach((word, i) => {
       const p = Math.min(Math.max(0, elapsed - fWrap.lineOf[i] * 0.12 - fWrap.posInLine[i] * 0.04) / 0.28, 1);
@@ -3442,7 +3687,7 @@ const AnimModes = {
      выбрасываются: поле обтекает набор, и строка читается на чистом месте,
      как в референсе.
   ═══════════════════════════════════════════════ */
-  echo({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+  echo({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn, originX, originY }) {
     if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
     const n = words.length;
     const widths = _measureWordsPx(ctx, words, fontSize, font);
@@ -3490,13 +3735,37 @@ const AnimModes = {
        Вариант — по тексту строки, чтобы соседние строки секции не давали
        одно и то же поле. */
     const FV   = _variantOf(words, 3);
-    const ECHO = (FV === 1) ? 0.36 : (FV === 2) ? 0.85 : 0.42;
-    const eW   = widths[hi] * ECHO;
-    const eH   = fontSize * ECHO;
-    const stepX = eW + fontSize * ECHO * (FV === 1 ? 1.5 : FV === 2 ? 0.5 : 0.7);
-    const stepY = eH * (FV === 1 ? 2.6 : FV === 2 ? 1.6 : 1.9);
-    const cols  = Math.min(6, Math.max(2, Math.floor(band / stepX)));
-    const rows  = Math.min(9, Math.max(2, Math.floor((canvasH * 0.85) / stepY)));
+    let ECHO = (FV === 1) ? 0.36 : (FV === 2) ? 0.85 : 0.42;
+    let eW, eH, stepX, stepY;
+    const _cell = () => {
+      eW = widths[hi] * ECHO;
+      eH = fontSize * ECHO;
+      stepX = eW + fontSize * ECHO * (FV === 1 ? 1.5 : FV === 2 ? 0.5 : 0.7);
+      stepY = eH * (FV === 1 ? 2.6 : FV === 2 ? 1.6 : 1.9);
+    };
+    _cell();
+    /* Поле кроет ВЕСЬ КАДР, а не колонку набора.
+       Раньше число колонок считалось от band — а band это ширина полосы,
+       отведённой тексту, и её сужает силуэт персонажа. То есть фактура
+       обрезалась ровно по спрайту и жила узким столбцом сбоку: видно на
+       кадре как пустая половина экрана. Фактура фигуре ничего не должна —
+       она идёт под ней. Считаем охват от точки строки до краёв кадра. */
+    const eOx = (typeof originX === 'number') ? originX : canvasW / 2;
+    const eOy = (typeof originY === 'number') ? originY : canvasH / 2;
+    /* Потолок на число ячеек: каждая — отдельный fillText на кадр.
+       При перерасходе НЕ обрезаем поле (иначе низ кадра остаётся голым —
+       ровно та же болезнь, что и обрезка по силуэту), а укрупняем ячейку:
+       повторов меньше, кадр по-прежнему закрыт целиком. */
+    const CAP = (n < 2) ? 0 : 120;
+    let spanL, spanR, spanT, spanB, cols, rows;
+    for (let guard = 0; guard < 14; guard++) {
+      spanL = -eOx - stepX; spanR = (canvasW - eOx) + stepX;
+      spanT = -eOy - stepY; spanB = (canvasH - eOy) + stepY;
+      cols  = Math.max(2, Math.ceil((spanR - spanL) / stepX));
+      rows  = Math.max(2, Math.ceil((spanB - spanT) / stepY));
+      if (cols * rows <= CAP || CAP === 0) break;
+      ECHO *= 1.15; _cell();
+    }
     const tilt  = (FV === 1) ? -0.18 : 0;
 
     // Чистая зона под набором — по фактическому габариту блока.
@@ -3508,12 +3777,11 @@ const AnimModes = {
     const drift = Math.sin(t * 0.35) * fontSize * 0.20;
     /* Одно слово в строке — размножать нечего: поле из того же слова, что
        и сам набор, читается как сбой рендера, а не как фактура. */
-    const CAP = (n < 2) ? 0 : 44;
     const field = [];
     for (let r = 0; r < rows && field.length < CAP; r++) {
       for (let c = 0; c < cols && field.length < CAP; c++) {
-        const x = (c - (cols - 1) / 2) * stepX + ((r % 2) ? stepX * 0.35 : 0) + drift;
-        const y = (r - (rows - 1) / 2) * stepY;
+        const x = spanL + c * stepX + ((r % 2) ? stepX * 0.35 : 0) + drift;
+        const y = spanT + r * stepY;
         if (Math.abs(x) < clearW + eW / 2 && Math.abs(y) < clearH + eH / 2) continue;
         field.push({
           ghost: true,

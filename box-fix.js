@@ -56,7 +56,7 @@
           `|\\{SHAKE\\}|\\{\\/SHAKE\\}|\\{WAVE\\}|\\{\\/WAVE\\}` +
           `|\\{OUTLINE\\}|\\{\\/OUTLINE\\}|\\{RAINBOW\\}|\\{\\/RAINBOW\\}` +
           `|\\{NEON\\}|\\{\\/NEON\\}|\\{BLUR\\}|\\{\\/BLUR\\}` +
-          `|\\{FLICKER\\}|\\{\\/FLICKER\\}` +
+          `|\\{FLICKER\\}|\\{\\/FLICKER\\}|\\{GRAD\\}|\\{\\/GRAD\\}` +
           `|\\*\\*?|_(?!_)|~~?|~(?!~))`, 'g'
         );
 
@@ -64,7 +64,7 @@
         const state = {
           bold:false, italic:false, underline:false, strike:false,
           big:false, small:false, glitch:false, glow:false, shake:false, wave:false,
-          outline:false, rainbow:false, neon:false, blur:false, flicker:false,
+          outline:false, rainbow:false, neon:false, blur:false, flicker:false, grad:false,
           color: null,
         };
         ALL_IDS.forEach(id => { state[id] = false; });
@@ -87,7 +87,7 @@
             word: w, color: baseColor,
             bold:false, italic:false, underline:false, strike:false,
             big:false, small:false, glitch:false, glow:false, shake:false, wave:false,
-            outline:false, rainbow:false, neon:false, blur:false, flicker:false,
+            outline:false, rainbow:false, neon:false, blur:false, flicker:false, grad:false,
             ...Object.fromEntries(ALL_IDS.map(id => [id, false])),
           }));
         }

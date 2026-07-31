@@ -702,7 +702,7 @@ const ExportEngine = (() => {
         ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t, 0.28)
         : false;
 
-      BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, () => {
+      BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
         // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
         offCtx.globalAlpha = 1;
 
@@ -732,8 +732,12 @@ const ExportEngine = (() => {
           const mainBottom = TextRenderer.draw(
             offCtx, _exportLyric, textX, textY,
             _exportAnim, _exportFadeA,
-            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId, safe, _expShape
+            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId, safe, _expShape, pass
           );
+
+          // Перевод — часть читаемого набора, см. App.js: в ghost-проходе
+          // его нет, иначе он уйдёт под фигуру и продублируется.
+          if (pass === 'ghost') { offCtx.globalAlpha = 1; return; }
 
           // ── Перевод строки ──────────────────────────
           if (params.showTranslation && _exportLyric.translation) {

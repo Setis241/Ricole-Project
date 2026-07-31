@@ -5,7 +5,7 @@
      {BIG}…{/BIG} {SMALL}…{/SMALL}
      {GLITCH}…{/GLITCH} {GLOW}…{/GLOW}
      {WAVE}…{/WAVE} {OUTLINE}…{/OUTLINE}
-     {RAINBOW}…{/RAINBOW} {NEON}…{/NEON}
+     {RAINBOW}…{/RAINBOW} {NEON}…{/NEON} {GRAD}…{/GRAD}
      {BLUR}…{/BLUR} {FLICKER}…{/FLICKER}
      {COLOR:#hex}…{/COLOR}
      — Рамки/боксы (работают на уровне слова) —
@@ -25,6 +25,270 @@ const TextRenderer = (() => {
 
   // Последний замер страховки кадра — читается из window.RicoleDebug()
   let _diag = null;
+
+  /* ── Цвет: разбор и сдвиг к белому/чёрному ──
+     Нужен для градиентов по букве. Всё, что не разобралось (named-цвет,
+     hsl, currentColor), отдаётся назад как есть — тогда градиент просто
+     вырождается в плоскую заливку и ничего не ломается. */
+  function _rgb(color) {
+    if (typeof color !== 'string') return null;
+    const s = color.trim();
+    let m = s.match(/^#([0-9a-f]{3})$/i);
+    if (m) return [0,1,2].map(i => parseInt(m[1][i]+m[1][i], 16));
+    m = s.match(/^#([0-9a-f]{6})$/i);
+    if (m) return [0,2,4].map(i => parseInt(m[1].substr(i,2), 16));
+    m = s.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
+    if (m) return [+m[1], +m[2], +m[3]];
+    return null;
+  }
+  // k > 0 — к белому, k < 0 — к чёрному. Возвращает css-цвет.
+  function _shift(color, k, alpha) {
+    const c = _rgb(color);
+    if (!c) return color;
+    const to = k > 0 ? 255 : 0, a = Math.abs(k);
+    const [r,g,b] = c.map(v => Math.round(v + (to - v) * a));
+    return alpha === undefined ? `rgb(${r},${g},${b})` : `rgba(${r},${g},${b},${alpha})`;
+  }
+  // Поворот тона — для дуотона в {GRAD}: партнёрский цвет берём от самой
+  // буквы, а не из палитры, иначе градиент спорит с цветом строки.
+  function _hueRotate(color, deg, satBoost) {
+    const c = _rgb(color);
+    if (!c) return color;
+    let [r,g,b] = c.map(v => v/255);
+    const max = Math.max(r,g,b), min = Math.min(r,g,b), d = max-min;
+    let h = 0;
+    if (d) {
+      if (max === r)      h = ((g-b)/d) % 6;
+      else if (max === g) h = (b-r)/d + 2;
+      else                h = (r-g)/d + 4;
+    }
+    h = (h*60 + deg + 360) % 360;
+    const l = (max+min)/2;
+    let s = d === 0 ? 0 : d / (1 - Math.abs(2*l - 1));
+    s = Math.min(1, s * (satBoost || 1));
+    return `hsl(${h.toFixed(1)}, ${(s*100).toFixed(1)}%, ${(l*100).toFixed(1)}%)`;
+  }
+
+  // Насыщенность 0..1 — по ней решаем, можно ли крутить тон.
+  function _sat(color) {
+    const c = _rgb(color);
+    if (!c) return 0;
+    const [r,g,b] = c.map(v => v/255);
+    const max = Math.max(r,g,b), min = Math.min(r,g,b), d = max-min;
+    if (!d) return 0;
+    const l = (max+min)/2;
+    return d / (1 - Math.abs(2*l - 1));
+  }
+
+  /* Пара «холодный/тёплый» концы градиента.
+     Белый и серый — самые частые цвета строки, а поворот тона на них не
+     даёт ничего: hue у ахроматичного цвета не определён, и градиент
+     вырождается в серую растяжку. Поэтому на низкой насыщенности концы
+     берём фиксированные (лёд → латунь) — это даёт хрому цвет, не сдвигая
+     сам цвет строки. На цветном тексте концы по-прежнему выводим из него. */
+  function _duoEnds(color) {
+    if (_sat(color) < 0.18) return ['#a8d8ff', '#ffcf9a'];
+    return [_hueRotate(color, -46, 1.35), _hueRotate(color, 44, 1.3)];
+  }
+
+  /* ── Заливка по диагонали кегля ──
+     Плоский цвет читается как «текст положили поверх картинки». Перепад
+     идёт по диагонали ~20°, а не строго по вертикали: вертикаль на прописных
+     даёт ровные полосы, диагональ ведёт взгляд вдоль строки. Амплитуда
+     заметная — слабый перепад на видео просто не виден, он съедается
+     компрессией и фоном. Верх уходит почти в белый, низ — в насыщенную тень
+     с поворотом тона, чтобы тень была цветной, а не грязно-серой.
+     Диапазон меряем от кегля, а не от bbox: bbox прыгает от слова к слову
+     («ЛОМ» против «руль»), и градиент дышал бы на каждом слове. */
+  /* Глубокая тень цвета — нижний тон дуотона.
+     На референсе розовый уходит не в «тот же розовый, но темнее», а в
+     сине-фиолетовую глубину: тон уводится против часовой, насыщенность
+     срезается, светлота падает почти в ноль. Серо-чёрный низ выглядел бы
+     грязью, поэтому темнота обязана быть цветной. */
+  function _deepShade(color) {
+    // Не в чёрный: на тёмном кадре низ буквы иначе просто обрывается, и
+    // строка теряет нижнюю линию. Глубина цветная и различимая.
+    if (_sat(color) < 0.18) return '#3a2f52';
+    return _shift(_hueRotate(color, -54, 0.78), -0.62);
+  }
+
+  /* ── Слежка за фоновым слоем ────────────────────────────────────────
+     «Фон подстраивается» — жалоба, которую по кадру не поймать: скачок
+     длится один кадр, а на скриншоте видно только его результат. Гадать
+     по описанию дальше бессмысленно, поэтому фон меряется по факту.
+
+     Каждый кадр снимаем подпись фактически нарисованного фона: сколько
+     элементов, каким кеглем, от какой точки, какой habбит по краям. Если
+     между соседними кадрами что-то из этого прыгнуло сильнее порога —
+     запись уходит в кольцевой буфер вместе с ПРИЧИНАМИ-кандидатами
+     (сменилась строка? кегль? точка? число элементов?).
+
+     Читать: window.RicoleDebug().скачкиФона — там будет видно, что именно
+     дёргается, вместо очередной догадки. */
+  let _ghostPrev = null;
+  const _ghostJumps = [];
+  function _watchGhost(sig) {
+    const p = _ghostPrev;
+    _ghostPrev = sig;
+    if (!p) return;
+    const d = {
+      кегль:  Math.abs(sig.fs - p.fs),
+      точкаX: Math.abs(sig.cx - p.cx),
+      точкаY: Math.abs(sig.cy - p.cy),
+      левый:  Math.abs(sig.x0 - p.x0),
+      правый: Math.abs(sig.x1 - p.x1),
+      число:  Math.abs(sig.n  - p.n),
+    };
+    // Пороги: кадр к кадру фон движется на единицы пикселей. Всё, что
+    // больше, — это уже не движение, а пересборка.
+    const прыгнуло = d.кегль > 0.5 || d.точкаX > 6 || d.точкаY > 6 ||
+                     d.левый > 24 || d.правый > 24 || d.число > 0;
+    if (!прыгнуло) return;
+    _ghostJumps.push({
+      строкаБыла: p.line, строкаСтала: sig.line,
+      сменаСтроки: p.line !== sig.line,
+      кегль: p.fs.toFixed(1) + '→' + sig.fs.toFixed(1),
+      точка: Math.round(p.cx) + ',' + Math.round(p.cy) + '→' +
+             Math.round(sig.cx) + ',' + Math.round(sig.cy),
+      край:  Math.round(p.x0) + '…' + Math.round(p.x1) + '→' +
+             Math.round(sig.x0) + '…' + Math.round(sig.x1),
+      элементов: p.n + '→' + sig.n,
+    });
+    if (_ghostJumps.length > 40) _ghostJumps.shift();
+  }
+
+  /* Состояние страховки кадра между кадрами — см. _fit в drawWordLayout. */
+  let _fitSoft = 1, _fitKey = '';
+  /* То же для вписывания раскладки в зону (kFit): при зуме камеры зона
+     меняется каждый кадр, и без латча набор пересобирается непрерывно. */
+  let _kFitSoft = 1, _kFitKey = '';
+
+  function fillGradient(ctx, x, cy, tw, size, color) {
+    if (!_rgb(color)) return color;
+    const g = ctx.createLinearGradient(0, cy - size*0.62, 0, cy + size*0.46);
+    const deep = _deepShade(color);
+    // Перелом резкий и смещён вниз — как на референсе, где тёмная порода
+    // подступает снизу и съедает цвет за короткий участок, а не плавно
+    // растворяется по всей высоте.
+    g.addColorStop(0,    _shift(color,  0.16));
+    g.addColorStop(0.34, color);
+    g.addColorStop(0.62, _shift(color, -0.30));
+    g.addColorStop(0.84, _shift(deep,   0.10));
+    g.addColorStop(1,    deep);
+    return g;
+  }
+
+  /* ── {GRAD}: дуотон во всю высоту, чистый цвет → цветная глубина ── */
+  function duotoneGradient(ctx, x, cy, tw, size, color) {
+    if (!_rgb(color)) return color;
+    const g = ctx.createLinearGradient(0, cy - size*0.66, 0, cy + size*0.48);
+    const deep = _deepShade(color);
+    g.addColorStop(0,    _shift(color,  0.34));
+    g.addColorStop(0.26, _shift(color,  0.06));
+    g.addColorStop(0.55, _shift(color, -0.14));
+    g.addColorStop(0.78, _shift(deep,   0.18));
+    g.addColorStop(1,    _shift(deep,  -0.12));
+    return g;
+  }
+
+  /* ── Фактура ──
+     Референс — не чистая растяжка, а порода: цвет проеден крошкой, и чем
+     ниже, тем её больше. Готовим один тайл шума и красим им букву вторым
+     проходом fillText — так крошка обрезается ровно по глифам. Плотность
+     набираем полосами: clip по прямоугольнику дёшев, а альфа-градиент
+     поверх паттерна в canvas недоступен. */
+  let _grainTile = null;
+  function _grainPattern(ctx) {
+    if (!_grainTile) {
+      const n = 128;
+      const c = document.createElement('canvas');
+      c.width = c.height = n;
+      const g = c.getContext('2d');
+      const img = g.createImageData(n, n);
+      for (let i = 0; i < n*n; i++) {
+        const v = Math.random();
+        // Крошка редкая и рваная: большая часть тайла прозрачна, иначе
+        // это читается как равномерный шум видеокодека, а не как фактура.
+        const a = v > 0.62 ? (v - 0.62) / 0.38 : 0;
+        const o = i*4;
+        img.data[o] = img.data[o+1] = img.data[o+2] = 0;
+        img.data[o+3] = Math.round(a * 235);
+      }
+      g.putImageData(img, 0, 0);
+      _grainTile = c;
+    }
+    return ctx.createPattern(_grainTile, 'repeat');
+  }
+
+  function drawGrain(ctx, word, x, y, tw, size, strength) {
+    // Ниже ~52px крошка не читается — тайл 128px даёт на такой букве
+    // считанные точки. Проход всё равно стоит fillText на слово, поэтому
+    // просто не делаем его.
+    if (size < 52) return;
+    const pat = _grainPattern(ctx);
+    if (!pat) return;
+    const half = Math.max(tw, size) * 0.6;
+    const top = y - size*0.7, h = size*1.25;
+    ctx.save();
+    ctx.fillStyle = pat;
+    // Три полосы снизу вверх: у базовой линии крошки густо, к верхним
+    // выносным она сходит на нет.
+    // Две полосы, не три: третья добавляла проход fillText на слово и почти
+    // ничего не давала глазу — крошка и так густеет к базовой линии.
+    const bands = [[0.34, 0.38], [0.72, 0.70]];
+    for (const [a, from] of bands) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(x - half, top + h*from, half*2, h*(1 - from) + 2);
+      ctx.clip();
+      ctx.globalAlpha = a * strength;
+      ctx.fillText(word, x, y);
+      ctx.restore();
+    }
+    ctx.restore();
+  }
+
+  /* ── Ореол под буквой вместо обводки ──
+     Строка обязана читаться на любом кадре, но strokeText утолщает штрих и
+     ломает рисунок шрифта. Здесь то же самое делает мягкая тень: плотное
+     тёмное пятно точно под глифом (blur ≈ 12% кегля, сдвиг вниз ≈ 4%) плюс
+     широкий разрежённый подбой. Контур остаётся контуром шрифта, а контраст
+     набирается за границей глифа. Два прохода вместо четырёх слоёв —
+     shadowBlur считается гауссом на каждую отрисовку и стоит дорого. */
+  function drawContactShadow(ctx, word, x, y, size, color, halo) {
+    ctx.save();
+    // ОДИН проход с тенью, не два. shadowBlur — гаусс на каждую отрисовку,
+    // и цена растёт квадратично от радиуса; на плотной строке пара таких
+    // проходов на слово уже видна в экспорте. Цвет ореола — глубокая тень
+    // самого цвета: тёмная настолько, чтобы держать контраст на светлом
+    // кадре, и цветная настолько, чтобы читаться как свечение, а не грязь.
+    ctx.fillStyle = 'rgba(0,0,0,0.92)';
+    ctx.shadowColor  = _shift(_deepShade(color), -0.15, 0.9);
+    ctx.shadowBlur   = Math.min(30, size * (halo || 0.26));
+    ctx.shadowOffsetY = size*0.03;
+    ctx.globalAlpha *= 0.85;
+    ctx.fillText(word, x, y);
+    ctx.restore();
+  }
+
+  /* ── Блик ──
+     Отдельный проход fillText градиентом «прозрачно → белый → прозрачно».
+     Это способ обрезать блик ровно по глифам: пути текста в canvas нет,
+     а clip() требует путь, поэтому светим второй заливкой, а не маской.
+     Полоса едет по слову; фаза завязана на x, чтобы соседние слова строки
+     не вспыхивали синхронно и строка не мигала одним куском. */
+  function sheenGradient(ctx, x, cy, tw, size, t, strength) {
+    const half = Math.max(tw, size) * 0.5;
+    const g = ctx.createLinearGradient(x - half, cy + size*0.4, x + half, cy - size*0.5);
+    const p = (Math.sin(t*1.15 + x*0.0035) * 0.5 + 0.5) * 0.76 + 0.12;
+    const w = 0.13;
+    g.addColorStop(0, 'rgba(255,255,255,0)');
+    g.addColorStop(Math.max(0.001, p - w), 'rgba(255,255,255,0)');
+    g.addColorStop(p, `rgba(255,255,255,${strength})`);
+    g.addColorStop(Math.min(0.999, p + w), 'rgba(255,255,255,0)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    return g;
+  }
 
   function getFadeAlpha(elapsed, duration, fadeDur) {
     const fadeIn  = Math.min(elapsed / fadeDur, 1);
@@ -54,8 +318,12 @@ const TextRenderer = (() => {
       .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POS|BGIMG|OVFX):[^}]+\}|\{LNOBOX\}/g, '') // убрать line-style теги
       .replace(/\/[^\/{}]+\//g, '')                         // убрать ВСЕ /КОМАНДЫ/ включая /ZOOM IN/ (скобки исключены, чтобы не съесть {/GLOW}{/BOX…})
       .trim();
-    // После зачистки section-метка оказывается в начале — убираем
-    text = text.replace(/^\[[^\]]+\]\s*/g, '').trim();
+    /* После зачистки section-метка оказывается в начале — убираем.
+       Якорь ^ пропускает ведущие словесные теги: {LANIM}-подобные сняты
+       выше, но {GLOW}/{BOX…} остаются, и метка «[Chorus]» за ними переставала
+       считаться меткой — уезжала в кадр как слово песни. Ведущие теги
+       сохраняем ($1), режем только саму метку. */
+    text = text.replace(/^((?:\{[^}]*\}|\s)*)\[[^\]]+\]\s*/, '$1').trim();
 
     const spans = [];
     const BOX_TAGS = typeof BoxRegistry !== 'undefined' ? BoxRegistry.all.map(s=>s.id.toUpperCase()).join('|') : 'BOX|BOXNEON|BOXGLASS|BOXSHADOW|BOXTAPE|BOXROUGH|BOXFIRE|BOXICE|BOXHOLO|BOXGOLD|BOXCYBER|BOXRAINBOW|BOXRETRO|BOXAURA|BOXMATRIX|BOXSMOKE|BOXPLASMA|BOXTATTOO|BOXSUNSET|BOXLACQUER|BOXCRYSTAL|BOXDANGER|BOXDIAMOND|BOXFAULT|BOXINK|BOXPORTAL|BOXSIGIL|BOXSTATIC|BOXVHS|BOXVIRUS|BOXWAVE|BOXWIRE';
@@ -67,7 +335,7 @@ const TextRenderer = (() => {
       `|\\{SHAKE\\}|\\{\\/SHAKE\\}|\\{WAVE\\}|\\{\\/WAVE\\}` +
       `|\\{OUTLINE\\}|\\{\\/OUTLINE\\}|\\{RAINBOW\\}|\\{\\/RAINBOW\\}` +
       `|\\{NEON\\}|\\{\\/NEON\\}|\\{BLUR\\}|\\{\\/BLUR\\}` +
-      `|\\{FLICKER\\}|\\{\\/FLICKER\\}` +
+      `|\\{FLICKER\\}|\\{\\/FLICKER\\}|\\{GRAD\\}|\\{\\/GRAD\\}` +
       `|\\*\\*?|_(?!_)|~~?|~(?!~))`, 'g'
     );
 
@@ -84,7 +352,7 @@ const TextRenderer = (() => {
     const state = {
       bold:false,italic:false,underline:false,strike:false,
       big:false,small:false,glitch:false,glow:false,shake:false,wave:false,
-      outline:false,rainbow:false,neon:false,blur:false,flicker:false,
+      outline:false,rainbow:false,neon:false,blur:false,flicker:false,grad:false,
       color:null,
     };
     for (const id of _ACTIVE_BOX_IDS)  state[id] = false;
@@ -110,7 +378,7 @@ const TextRenderer = (() => {
         word:w, color:baseColor,
         bold:false,italic:false,underline:false,strike:false,
         big:false,small:false,glitch:false,glow:false,shake:false,wave:false,
-        outline:false,rainbow:false,neon:false,blur:false,flicker:false,
+        outline:false,rainbow:false,neon:false,blur:false,flicker:false,grad:false,
         ..._emptyBoxes,
       }));
     }
@@ -678,11 +946,25 @@ const TextRenderer = (() => {
     ctx.textBaseline = 'middle';
     ctx.shadowBlur   = 0;
     ctx.shadowColor  = 'transparent';
-    ctx.filter       = 'none';
+    // filter НЕ сбрасываем в 'none': вызывающий мог выставить размытие для
+    // всего элемента (расплывание подложки на басу). Раньше сброс стирал
+    // его молча, и эффект просто не доезжал до холста.
+    const baseFilter = (ctx.filter && ctx.filter !== 'none') ? ctx.filter : '';
+    ctx.filter       = baseFilter || 'none';
 
     let dx=0, dy=0;
     if (span.wave) dy += Math.sin(t*4 + x*0.02)*4;
-    if (span.blur) ctx.filter = 'blur(3px)';
+    if (span.blur) ctx.filter = baseFilter ? `${baseFilter} blur(3px)` : 'blur(3px)';
+
+    /* Кому дуотон НЕ положен.
+       — Подложка (_ghost): это декорация кадра, а не текст. Градиент с
+         фактурой делает её вторым набором, она начинает спорить с передним
+         и кадр читается как две строки друг на друге. Ей нужна ровная
+         полупрозрачная заливка, а жизнь — от расплывания на басу.
+       — Мелкий кегль: перепад светлоты на высоте 20-30px съедает половину
+         штриха, и подпись становится нечитаемой. Порог 38px — ниже него
+         градиент физически некуда положить. */
+    const plainFill = !!span._ghost || size < 38;
 
     const finalX = x+dx, finalY = y+dy;
     const metrics = ctx.measureText(span.word);
@@ -725,6 +1007,17 @@ const TextRenderer = (() => {
       ctx.strokeText(span.word,finalX,finalY);
       ctx.fillStyle=grd; ctx.fillText(span.word,finalX,finalY);
 
+    } else if (span.grad && !plainFill) {
+      // Дуотон + бегущий блик. Отделение от фона — цветной ореол под буквой,
+      // а не обводка: обводка на кегле 70+ утолщает штрих и превращает набор
+      // в мультяшный стикер.
+      drawContactShadow(ctx, span.word, finalX, finalY, size, span.color, 0.40);
+      ctx.fillStyle=duotoneGradient(ctx,finalX,finalY,tw,size,span.color);
+      ctx.fillText(span.word,finalX,finalY);
+      drawGrain(ctx,span.word,finalX,finalY,tw,size,1.0);
+      ctx.fillStyle=sheenGradient(ctx,finalX,finalY,tw,size,t,0.85);
+      ctx.fillText(span.word,finalX,finalY);
+
     } else if (span.glitch) {
       const gShift=Math.sin(t*97)*size*0.08;
       ctx.globalAlpha*=0.85;
@@ -757,9 +1050,32 @@ const TextRenderer = (() => {
       ctx.fillStyle=glowColor; ctx.fillText(span.word,finalX,finalY);
 
     } else {
-      ctx.strokeStyle='rgba(0,0,0,0.7)'; ctx.lineWidth=Math.max(2,size*0.06);
-      ctx.lineJoin='round'; ctx.strokeText(span.word,finalX,finalY);
-      ctx.fillStyle=span.color; ctx.fillText(span.word,finalX,finalY);
+      // Базовый набор. Обводки здесь больше нет: чёрный контур в size*0.06
+      // раздувал штрих и убивал рисунок шрифта — на кегле 70+ это читалось
+      // как наклейка. Букву от фона отделяет мягкий ореол, форму держит
+      // диагональный градиент, верхний край ловит короткий блик.
+      if (plainFill) {
+        // Ровная заливка. Подложке ореол не нужен вовсе — он её проявляет;
+        // мелкому кеглю нужен, иначе подпись тонет в кадре.
+        if (!span._ghost) {
+          ctx.save();
+          ctx.shadowColor='rgba(0,0,0,0.7)'; ctx.shadowBlur=Math.max(3,size*0.22);
+          ctx.shadowOffsetY=size*0.05;
+          ctx.fillStyle='rgba(0,0,0,0.85)';
+          ctx.globalAlpha*=0.6;
+          ctx.fillText(span.word,finalX,finalY);
+          ctx.restore();
+        }
+        ctx.fillStyle=span.color;
+        ctx.fillText(span.word,finalX,finalY);
+      } else {
+        drawContactShadow(ctx, span.word, finalX, finalY, size, span.color, 0.26);
+        ctx.fillStyle=fillGradient(ctx,finalX,finalY,tw,size,span.color);
+        ctx.fillText(span.word,finalX,finalY);
+        drawGrain(ctx,span.word,finalX,finalY,tw,size,0.75);
+        ctx.fillStyle=sheenGradient(ctx,finalX,finalY,tw,size,t,0.45);
+        ctx.fillText(span.word,finalX,finalY);
+      }
     }
 
     if (span.underline) {
@@ -786,9 +1102,29 @@ const TextRenderer = (() => {
      anim.words = [{ word, x, y, scale, alpha, rotation, fontScale? }]
      x,y — смещение от центра холста (cx, cy)
   ══════════════════════════════════════════════ */
-  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt) {
+  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt, pass = null) {
     const totalAlpha = (anim.alpha ?? 1) * fadeAlpha;
     if (totalAlpha <= 0.001) return;
+
+    /* ── Фоновый слой живёт ВНЕ рамок и ВНЕ страховок ──────────────────
+       Подложка, стена повторов, встречная тень — это декорация кадра, а не
+       текст. Она посчитана режимом от размера КАДРА и обязана выходить за
+       любые границы: в том и приём, что она кроет фон целиком и уходит на
+       обрез.
+
+       Ниже идут три поправки на кадр — сжатие позиций, сжатие кегля и
+       сдвиг центра блока внутрь зоны. Позиции фона из них уже были
+       исключены, а вот КЕГЛЬ и ЦЕНТР — нет: fontSize после вписывания
+       общий, cx/cy тоже, и фон ехал вместе с набором. Каждый раз, когда
+       страховка срабатывала (заезд слова, зум камеры, дыхание на басу),
+       стена меняла размер и сдвигалась — это и читалось как «фон
+       подстраивается».
+
+       Поэтому запоминаем исходные кегль и точку строки ДО всех поправок и
+       рисуем фон по ним. Фон не участвует в кадровых расчётах вообще ни
+       одним числом. */
+    const ghostFontSize = fontSize;
+    const ghostCx = cx, ghostCy = cy;
 
     // ── Вписываем word-layout в безопасную зону кадра ───────────────────
     // Считаем bbox финальных позиций слов; если он шире/выше зоны —
@@ -808,10 +1144,28 @@ const TextRenderer = (() => {
     /* bbox раскладки при заданном кегле. Считается по фактическим позициям
        и ширинам слов, поэтому пересчитывать его надо после КАЖДОГО сжатия:
        позиции и ширины ужимаются разными коэффициентами. */
-    function wlBBox(words, fs) {
+    function wlBBox(words, fs, settledOnly = true) {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
       for (const wData of words) {
         if (!wData.word || !wData.word.trim()) continue;
+        /* Слова на заезде в габарит не входят — по той же причине, по
+           которой они исключены из страховки ниже. Кинетика приводит их
+           из-за края полосы; пока они летят, bbox огромный, вписывание
+           ужимает кегль и ДВИГАЕТ ЦЕНТР БЛОКА, а через полсекунды всё
+           возвращается. Отсюда и «текст встаёт заново» на каждой строке:
+           это не смена строки, это вписывание, отработавшее по словам,
+           которых ещё нет на месте. Фоновый слой центр двигает вместе с
+           набором, поэтому заметнее всего было именно на нём. */
+        if (settledOnly && (wData.alpha ?? 1) < 0.55) continue;
+        /* Фоновый слой (ghost) в замер НЕ входит — и это не мелочь.
+           Стена повторов и подложка выходят за кадр НАМЕРЕННО: они кроют
+           фон целиком. Если мерить габарит вместе с ними, страховка видит
+           «раскладка вылезла» и ужимает ВСЮ строку вместе с фоном, а потом
+           ещё и подвигает центр внутрь зоны. Результат: стена схлопывается
+           в полосу посреди кадра, верх и низ остаются голыми, и вдобавок
+           уезжает кегль настоящего текста. Страховка существует ради
+           читаемого набора — по нему и меряем. */
+        if (wData.ghost) continue;
         const wFs = fs * (wData.scale ?? 1);
         if (wFs < 2) continue;
         ctx.font = `${wFs}px ${font}${EMOJI_FB}`;
@@ -824,6 +1178,8 @@ const TextRenderer = (() => {
     }
 
     if (isFinite(wlArea.h) && anim.words.length) {
+      // Пока не приземлилось ни одно слово, мерить нечего — в этот момент
+      // вписывать и нечего: набора на экране ещё нет.
       let bb = wlBBox(anim.words, fontSize);
       if (bb.minX < Infinity) {
         const padW = wlArea.w * 0.04, padH = wlArea.h * 0.04;
@@ -837,11 +1193,32 @@ const TextRenderer = (() => {
              позиции  — жмём насколько нужно, без пола: разлёт это фантазия
                         режима, её не жалко;
              кегль    — с полом 0.45, иначе слова станут нечитаемой пылью. */
-        const kFit  = Math.min(1, availW / ((bb.maxX - bb.minX) || 1),
-                                  availH / ((bb.maxY - bb.minY) || 1));
+        let kFit = Math.min(1, availW / ((bb.maxX - bb.minX) || 1),
+                               availH / ((bb.maxY - bb.minY) || 1));
+        /* Латч вписывания. availW/availH считаются от ВИДИМОЙ области, а при
+           зуме камеры она меняется каждый кадр — без латча коэффициент едет
+           вместе с зумом и набор непрерывно пересобирается.
+
+           Латч ОДНОСТОРОННИЙ: в пределах строки коэффициент только падает и
+           никогда не возвращается. Сглаживание с медленным отпусканием,
+           которое стояло здесь до этого, было хуже болезни: одного кадра с
+           большим охватом хватало, чтобы схлопнуть набор, а потом он
+           МЕДЛЕННО отрастал обратно — то самое «подстраивается», только
+           растянутое на секунду. Одностороннее ужатие срабатывает один раз
+           и больше себя не показывает; цена — строка может остаться чуть
+           мельче, чем нужно, и это несравнимо дешевле пересборки на глазах.
+
+           Состояние привязано к строке и на новой сбрасывается в 1. */
+        const kKey = (typeof lyric === 'string' ? lyric : (lyric && lyric.text) || '') +
+                     '|' + Math.round(fontSize);
+        if (kKey !== _kFitKey) { _kFitKey = kKey; _kFitSoft = 1; }
+        _kFitSoft = Math.min(_kFitSoft, kFit);
+        kFit = _kFitSoft;
         if (kFit < 1) {
           fontSize *= Math.max(0.45, kFit);
-          anim = { ...anim, words: anim.words.map(w => ({
+          // Позиции фона не жмём: они посчитаны от кадра, а не от разлёта
+          // слов, и сжатие оставило бы по краям голую полосу.
+          anim = { ...anim, words: anim.words.map(w => w.ghost ? w : ({
             ...w, x: (w.x ?? 0) * kFit, y: (w.y ?? 0) * kFit,
           })) };
           bb = wlBBox(anim.words, fontSize);
@@ -853,7 +1230,7 @@ const TextRenderer = (() => {
             const ky = availH / ((bb.maxY - bb.minY) || 1);
             const k2 = Math.min(1, kx, ky);
             if (k2 >= 0.999) break;
-            anim = { ...anim, words: anim.words.map(w => ({
+            anim = { ...anim, words: anim.words.map(w => w.ghost ? w : ({
               ...w, x: (w.x ?? 0) * k2, y: (w.y ?? 0) * k2,
             })) };
             bb = wlBBox(anim.words, fontSize);
@@ -991,6 +1368,15 @@ const TextRenderer = (() => {
         if (!wD.word || !wD.word.trim()) continue;
         const sp = wD.ghost ? null : (wordSpans[si++] || null);
         if (wD.ghost) continue;
+        /* Слово на заезде в замер не идёт. Кинетика приводит слова
+           ИЗДАЛЕКА — из-за края полосы, а то и из-за кадра. Пока такое слово
+           летит, оно задирает reach, страховка ужимает ВЕСЬ набор, а когда
+           слово приезжает — отпускает обратно. Именно это и читается как
+           «размер сам перестраивается»: страховка каждый кадр пересчитывала
+           композицию по слову, которого ещё нет на месте.
+           Порог по прозрачности: летящее слово всегда проявляется по ходу
+           заезда, поэтому непрозрачное слово — это уже приехавшее слово. */
+        if ((wD.alpha ?? 1) < 0.55) continue;
         const base = fontSize * (wD.scale ?? 1);
         if (base < 2) continue;
         const st  = sp ? ((sp.bold ? 'bold ' : '') + (sp.italic ? 'italic ' : '')) : '';
@@ -1006,6 +1392,24 @@ const TextRenderer = (() => {
       const room = Math.max(8, Math.min(cx - (wlArea.x + pole),
                                         (wlArea.x + wlArea.w - pole) - cx));
       if (reach > room) _fit = room / reach;
+
+      /* Латч страховки — односторонний, как и у вписывания выше.
+         Даже после отсева летящих слов охват живёт: набор дышит на басу,
+         разъезжается, меняет масштаб. Пересчитанный в лоб коэффициент
+         передаёт это дыхание всему блоку — строка пульсирует размером.
+
+         В пределах строки коэффициент только падает. Обратно он не растёт
+         НИКОГДА: именно возврат и читается как «текст сам перестраивается»,
+         причём читается тем заметнее, чем плавнее сделан. Ужатие же
+         одноразовое — глаз ловит его как часть появления строки.
+
+         Состояние привязано к строке: на новой строке набор другой, и
+         тащить в него ужатие предыдущей нельзя. */
+      const fitKey = (typeof lyric === 'string' ? lyric : (lyric && lyric.text) || '') +
+                     '|' + Math.round(fontSize);
+      if (fitKey !== _fitKey) { _fitKey = fitKey; _fitSoft = 1; }
+      _fitSoft = Math.min(_fitSoft, _fit);
+      _fit = _fitSoft;
       // Диагностика: последние ФАКТИЧЕСКИЕ числа отрисовки — их читает
       // window.RicoleDebug(). Без них спор о том, что происходит в кадре,
       // ведётся по скриншотам, а по скриншоту пиксель не измеришь.
@@ -1034,26 +1438,36 @@ const TextRenderer = (() => {
       const wData = anim.words[wi];
       if (!wData.word || !wData.word.trim()) continue;
       const isGhost = !!wData.ghost;
+      /* Фильтр прохода. Стоит ДО spanIdx++, но счётчик от этого не врёт:
+         его двигают только настоящие слова, а пропускаем мы их лишь в
+         ghost-проходе, где разметка вообще не нужна. В main-проходе
+         отбрасываются только ghost-элементы, которые счётчика не касаются. */
+      if (pass === 'ghost' && !isGhost) continue;
+      if (pass === 'main'  &&  isGhost) continue;
       const mySpan  = isGhost ? null : wordSpans[spanIdx++];
       const wAlpha = wData.alpha ?? 1;
       if (wAlpha <= 0.001) continue;
 
-      // Страховка кадра (см. выше) — ужимает только настоящий набор:
-      // подложка выходит за край намеренно.
+      /* Кадровые поправки — только для настоящего набора. Фон рисуется
+         исходным кеглем от исходной точки строки: он декорация кадра и
+         вправе вылезать за любые границы (см. ghostFontSize выше). */
       const k         = isGhost ? 1 : _fit;
       const wScale    = (wData.scale ?? 1) * k;
       const wRot      = wData.rotation ?? 0;
-      const wFontSize = fontSize * wScale;
+      const wFontSize = (isGhost ? ghostFontSize : fontSize) * wScale;
       if (wFontSize < 2) continue;
 
       // Берём соответствующий span (или дефолт без эффектов)
       const span = mySpan ?? { word: wData.word, color, bold: false, italic: false };
       // Обновляем word на случай расхождения (напр. после чистки rawText)
       const spanForDraw = { ...span, word: wData.word };
+      // Подложка рисуется базовым стилем и БЕЗ дуотона — см. plainFill.
+      if (isGhost) spanForDraw._ghost = true;
 
       ctx.save();
       ctx.globalAlpha *= wAlpha;
-      ctx.translate(cx + wData.x * k, cy + wData.y * k);
+      ctx.translate((isGhost ? ghostCx : cx) + wData.x * k,
+                    (isGhost ? ghostCy : cy) + wData.y * k);
       if (wRot) ctx.rotate(wRot);
 
       // Предварительно меряем ширину при нужном размере
@@ -1074,6 +1488,24 @@ const TextRenderer = (() => {
     }
 
     ctx.restore();
+
+    /* Подпись фона за этот кадр — см. _watchGhost. Снимаем в проходе, где
+       фон реально рисуется: в 'main' его нет, и сравнивать было бы нечего. */
+    if (pass !== 'main') {
+      let n = 0, x0 = Infinity, x1 = -Infinity;
+      for (const wD of anim.words) {
+        if (!wD.ghost || !wD.word || !wD.word.trim()) continue;
+        if ((wD.alpha ?? 1) <= 0.001) continue;
+        n++;
+        const hw = ghostFontSize * (wD.scale ?? 1) * wD.word.length * 0.3;
+        if ((wD.x ?? 0) - hw < x0) x0 = (wD.x ?? 0) - hw;
+        if ((wD.x ?? 0) + hw > x1) x1 = (wD.x ?? 0) + hw;
+      }
+      if (n) _watchGhost({
+        line: (typeof lyric === 'string' ? lyric : (lyric && lyric.text) || '').slice(0, 24),
+        fs: ghostFontSize, cx: ghostCx, cy: ghostCy, x0: x0, x1: x1, n: n,
+      });
+    }
 
     // Возвращаем нижнюю границу последнего слова (для позиционирования перевода)
     let wlBottom = cy;
@@ -1197,7 +1629,15 @@ const TextRenderer = (() => {
   }
 
   /* ── Main draw ── */
-  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null, shapeAt=null) {
+  /* pass — какую часть набора рисовать:
+       null / 'all' — всё (обычный случай);
+       'ghost'      — только служебный слой (подложка, эхо, встречная тень);
+       'main'       — только сам текст.
+     Двухпроходная отрисовка нужна там, где между слоями встаёт спрайт:
+     дубль уходит ЗА фигуру, читаемый текст остаётся ПЕРЕД ней. Раньше набор
+     был неделим, поэтому за фигуру приходилось прятать его целиком вместе с
+     дублем — и слово теряло хвост ровно там, где его надо читать. */
+  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null, shapeAt=null, pass=null) {
     // lyric.text уже очищен парсером (без /commands/, без {LFONT:...}, без empty-маркеров).
     // НИ В КОЕМ СЛУЧАЕ не фолбэчимся на rawText — пустой text это намеренное состояние
     // (техническая строка / маркер «(пусто)») и текст не должен рисоваться.
@@ -1215,8 +1655,11 @@ const TextRenderer = (() => {
 
     // ── Word Layout (kinetic per-word positioning) ──
     if (anim && anim.wordLayout && Array.isArray(anim.words)) {
-      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt);
+      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt, pass);
     }
+    /* Непословные режимы делить не на что: у них служебного слоя нет.
+       Проход 'ghost' для них — пустой, иначе строка нарисуется дважды. */
+    if (pass === 'ghost') return;
 
     const totalAlpha = alpha*fadeAlpha;
     if (totalAlpha<=0.001) return;
@@ -1506,7 +1949,14 @@ const TextRenderer = (() => {
     return bottomY;
   }
 
-  return { draw, getFadeAlpha, get lastFrameGuard() { return _diag; } };
+  /* Палитра текста наружу. Нужна авторежиссёру: фигура в кадре должна
+     держать ТУ ЖЕ палитру, что и набор, иначе спрайт покрашен сам по себе,
+     а текст сам по себе — два слоя из разных клипов. Отдаём именно тот
+     цвет, в который уходит градиент буквы, а не исходный цвет текста:
+     исходный почти всегда белый, и подмешивать белое в фигуру бессмысленно. */
+  return { draw, getFadeAlpha, textShade: _deepShade,
+           get lastFrameGuard() { return _diag; },
+           get ghostJumps() { return _ghostJumps.slice(); } };
 })();
 
 

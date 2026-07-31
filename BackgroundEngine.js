@@ -4860,6 +4860,50 @@ const BackgroundEngine = (() => {
     return { draw, STYLES, LEGACY_MAP, FRAME_SLOTS_SCHEMA };
   })();
 
+  /* Цвет с альфой из #rgb/#rrggbb/rgb(). Неразобранное отдаём как есть —
+     тогда стоп градиента просто непрозрачный, а не сломанный. */
+  function _rgbaOf(color, a) {
+    if (typeof color !== 'string') return color;
+    const s = color.trim();
+    let m = s.match(/^#([0-9a-f]{3})$/i);
+    if (m) {
+      const v = [0,1,2].map(i => parseInt(m[1][i]+m[1][i], 16));
+      return `rgba(${v[0]},${v[1]},${v[2]},${a})`;
+    }
+    m = s.match(/^#([0-9a-f]{6})$/i);
+    if (m) {
+      const v = [0,2,4].map(i => parseInt(m[1].substr(i,2), 16));
+      return `rgba(${v[0]},${v[1]},${v[2]},${a})`;
+    }
+    m = s.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
+    if (m) return `rgba(${m[1]},${m[2]},${m[3]},${a})`;
+    return color;
+  }
+
+  /* Тайл крошки для фактуры фигуры. Тот же приём, что в renderers.js:
+     редкий рваный шум, а не равномерная сыпь — иначе читается как
+     артефакт кодека. Тайл один на всё приложение, паттерн от него дешёвый. */
+  let _grainTileBG = null;
+  function _grainPattern(ctx) {
+    if (!_grainTileBG) {
+      const n = 128;
+      const c = document.createElement('canvas');
+      c.width = c.height = n;
+      const g = c.getContext('2d');
+      const img = g.createImageData(n, n);
+      for (let i = 0; i < n*n; i++) {
+        const v = Math.random();
+        const a = v > 0.62 ? (v - 0.62) / 0.38 : 0;
+        const o = i*4;
+        img.data[o] = img.data[o+1] = img.data[o+2] = 0;
+        img.data[o+3] = Math.round(a * 235);
+      }
+      g.putImageData(img, 0, 0);
+      _grainTileBG = c;
+    }
+    return ctx.createPattern(_grainTileBG, 'repeat');
+  }
+
   function _drawOverlayItem(ctx, ov, cw, ch, bands, t, effectOverride = null, dt = 0.016) {
     // Если пользователь отключил аудио-реактивность для объекта — обнуляем bands.
     // Тогда движения (scroll_*, sway, drift, float, ...) идут с константной скоростью,
@@ -5169,7 +5213,8 @@ const BackgroundEngine = (() => {
        содержит только этот объект — за его пределы эффект не уходит. */
     const feather = +ov.feather || 0;      // 0..1, доля от размера фигуры
     const tintAmt = +ov.tintAmt || 0;      // 0..1
-    if (feather > 0.001 || (tintAmt > 0.001 && ov.tint)) {
+    const gradeAmt = ov.gradeAmt === undefined ? 0.34 : +ov.gradeAmt;
+    if (feather > 0.001 || (tintAmt > 0.001 && ov.tint) || gradeAmt > 0.001) {
       const bx = baseX + offX - drawW / 2;
       const by = baseY + offY - drawH / 2;
 
@@ -5179,6 +5224,43 @@ const BackgroundEngine = (() => {
         ctx.globalAlpha = Math.min(1, tintAmt);
         ctx.fillStyle = ov.tint;
         ctx.fillRect(bx - drawW, by - drawH, drawW * 3, drawH * 3);
+        ctx.restore();
+      }
+
+      /* ── Дуотон-фактура на фигуре ──
+         Та же порода, что и на тексте: снизу цвет уходит в цветную
+         глубину и проедается крошкой. Кладём ПОСЛЕ tint и ДО feather —
+         тонировка задаёт свет сцены, фактура ложится на него, а мягкий
+         край гасится последним, иначе крошка проступала бы за срезом.
+         Всё идёт через source-atop, то есть строго по альфе картинки:
+         силуэт остаётся силуэтом. Холст здесь временный и содержит
+         только этот объект — соседи не пачкаются.
+         Выключается ov.gradeAmt = 0. */
+      if (gradeAmt > 0.001) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-atop';
+
+        const deep = ov.gradeColor || ov.tint || '#2a1b3d';
+        const g = ctx.createLinearGradient(0, by, 0, by + drawH);
+        g.addColorStop(0,    'rgba(0,0,0,0)');
+        // Перелом смещён вниз: верх фигуры (лицо, плечи) обязан остаться
+        // читаемым, порода подступает снизу — как на референсе.
+        g.addColorStop(0.46, 'rgba(0,0,0,0)');
+        g.addColorStop(0.78, _rgbaOf(deep, 0.55 * gradeAmt));
+        g.addColorStop(1,    _rgbaOf(deep, 0.92 * gradeAmt));
+        ctx.fillStyle = g;
+        ctx.fillRect(bx, by, drawW, drawH);
+
+        const pat = _grainPattern(ctx);
+        if (pat) {
+          ctx.fillStyle = pat;
+          // Две полосы вместо трёх: на фотографии/рисунке крошка заметнее,
+          // чем на плашке буквы, и легко переходит в грязь.
+          ctx.globalAlpha = 0.16 * gradeAmt;
+          ctx.fillRect(bx, by + drawH * 0.50, drawW, drawH * 0.50);
+          ctx.globalAlpha = 0.26 * gradeAmt;
+          ctx.fillRect(bx, by + drawH * 0.74, drawW, drawH * 0.26);
+        }
         ctx.restore();
       }
 
@@ -5958,6 +6040,28 @@ const BackgroundEngine = (() => {
 
     const lyricLayerOverride = currentLyric && currentLyric.lineStyle && currentLyric.lineStyle.layer;
 
+    /* ── Цвет фигуры идёт за цветом ТЕКУЩЕЙ строки ──────────────────────
+       Тонировка спрайта задавалась один раз на весь клип: авторежиссёр
+       считал её при разметке и клал в оверрайды готовым цветом. Текст же
+       красится построчно — секция, ручной {LCOLOR}, эффекты слова, — и
+       фигура оставалась одного тона, пока набор рядом менял цвет. Два
+       слоя жили в разных палитрах, что и видно в кадре.
+
+       Поэтому цвет резолвится КАЖДЫЙ КАДР, от той строки, которая сейчас
+       на экране. Берётся тот же теневой тон, в который уходит градиент
+       буквы (TextRenderer.textShade) — фигура держит свет набора, а не
+       копирует его цвет в лоб.
+
+       Работает только для объектов с ov.tintFromText: обычные объекты
+       остаются со своей настроенной тонировкой. */
+    let _textTint = null;
+    {
+      const lineColor = currentLyric && currentLyric.lineStyle && currentLyric.lineStyle.color;
+      if (lineColor && typeof TextRenderer !== 'undefined' && TextRenderer.textShade) {
+        _textTint = TextRenderer.textShade(lineColor);
+      }
+    }
+
     function _renderOv(ov) {
       if (!ov.enabled) return;
 
@@ -5979,6 +6083,14 @@ const BackgroundEngine = (() => {
       if (_lineOv) {
         _ovSaved = {};
         for (const k in _lineOv) { _ovSaved[k] = ov[k]; ov[k] = _lineOv[k]; }
+      }
+      /* Тонировка от текста — поверх построчных оверрайдов: цвет строки
+         меняется чаще, чем разметка, и последнее слово должно быть за ним.
+         Подмена временная, как и вся секция выше: _ovRestore вернёт своё. */
+      if (ov.tintFromText && _textTint) {
+        if (!_ovSaved) _ovSaved = {};
+        if (!('tint' in _ovSaved)) _ovSaved.tint = ov.tint;
+        ov.tint = _textTint;
       }
       const _ovRestore = () => {
         if (!_ovSaved) return;
@@ -6080,7 +6192,7 @@ const BackgroundEngine = (() => {
       ctx.restore();
     }
 
-    const _drawText = () => { if (typeof drawTextCb === 'function') drawTextCb(); };
+    const _drawText = (pass) => { if (typeof drawTextCb === 'function') drawTextCb(pass); };
     const _renderAll = () => {
       for (let i = 0; i < overlays.length; i++) _renderOv(overlays[i]);
     };
@@ -6091,16 +6203,28 @@ const BackgroundEngine = (() => {
     //   per-overlay ov.layer === 'above'  → рисуются ПОСЛЕ текста (поверх)
     // Если у лирики есть lineStyle.layer override — он бьёт per-overlay настройку
     // для текущей строки (легаси, нужно для команд /ABOVE/ /BELOW/ из LRC).
-    function _renderLayer(targetLayer) {
+    function _layerOf(ov) {
+      // Слой тоже может переопределяться построчно: персонаж уходит за текст
+      // на плотных строках и выходит перед ним на ударных.
+      const _loLayer = (ov.lineOverrides && activeLineIdx >= 0 &&
+                        ov.lineOverrides[activeLineIdx] &&
+                        ov.lineOverrides[activeLineIdx].layer) || null;
+      return lyricLayerOverride || _loLayer || ov.layer || 'above';
+    }
+    /* Объект, который встаёт МЕЖДУ слоями набора: дубль (подложка, эхо,
+       встречная тень) уходит ему за спину, читаемый текст остаётся перед
+       ним. Ставится построчно — см. lineOverrides.textSplit в AutoDirector,
+       где им помечается фигура на строках с ghost-режимами. */
+    function _isSplitter(ov) {
+      return !!(ov.lineOverrides && activeLineIdx >= 0 &&
+                ov.lineOverrides[activeLineIdx] &&
+                ov.lineOverrides[activeLineIdx].textSplit);
+    }
+    function _renderLayer(targetLayer, filter) {
       for (let i = 0; i < overlays.length; i++) {
         const ov = overlays[i];
-        // Слой тоже может переопределяться построчно: персонаж уходит за текст
-        // на плотных строках и выходит перед ним на ударных.
-        const _loLayer = (ov.lineOverrides && activeLineIdx >= 0 &&
-                          ov.lineOverrides[activeLineIdx] &&
-                          ov.lineOverrides[activeLineIdx].layer) || null;
-        const lay = lyricLayerOverride || _loLayer || ov.layer || 'above';
-        if (lay !== targetLayer) continue;
+        if (_layerOf(ov) !== targetLayer) continue;
+        if (filter && !filter(ov)) continue;
         _renderOv(ov);
       }
     }
@@ -6115,8 +6239,23 @@ const BackgroundEngine = (() => {
     } else {
       // Дефолт: уважаем per-overlay ov.layer
       _renderLayer('below');
-      _drawText();
-      _renderLayer('above');
+      /* Есть ли на этой строке объект-разделитель среди тех, что идут ПОВЕРХ
+         текста. Если есть — набор рисуется в два прохода и фигура встаёт
+         между ними. Остальные 'above'-объекты (рамки, карточки) как были
+         поверх всего, так и остаются: их порядок трогать нельзя, иначе
+         рамка уедет под текст. */
+      const splitter = overlays.some(function(ov) {
+        return _layerOf(ov) === 'above' && _isSplitter(ov);
+      });
+      if (splitter) {
+        _drawText('ghost');
+        _renderLayer('above', _isSplitter);
+        _drawText('main');
+        _renderLayer('above', function(ov) { return !_isSplitter(ov); });
+      } else {
+        _drawText();
+        _renderLayer('above');
+      }
     }
   }
 

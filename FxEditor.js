@@ -59,6 +59,7 @@ const FxEditor = (() => {
     { label: '🅿 Poster',        value: 'poster' },
     { label: '▩ Backdrop',      value: 'backdrop' },
     { label: '⧉ Echo',          value: 'echo' },
+    { label: '⇹ Rift',          value: 'rift' },
     { label: '🎬 Montage',      value: 'montage' },
     { label: '🌊 Drift',        value: 'drift' },
     { label: '── Прокрутка ──', value: '',       disabled: true },
@@ -90,6 +91,7 @@ const FxEditor = (() => {
     wave:      ['{WAVE}',      '{/WAVE}'],
     outline:   ['{OUTLINE}',   '{/OUTLINE}'],
     rainbow:   ['{RAINBOW}',   '{/RAINBOW}'],
+    grad:      ['{GRAD}',      '{/GRAD}'],
     neon:      ['{NEON}',      '{/NEON}'],
     blur:      ['{BLUR}',      '{/BLUR}'],
     flicker:   ['{FLICKER}',   '{/FLICKER}'],
@@ -437,14 +439,14 @@ const FxEditor = (() => {
       `|\\{SHAKE\\}|\\{\\/SHAKE\\}|\\{WAVE\\}|\\{\\/WAVE\\}` +
       `|\\{OUTLINE\\}|\\{\\/OUTLINE\\}|\\{RAINBOW\\}|\\{\\/RAINBOW\\}` +
       `|\\{NEON\\}|\\{\\/NEON\\}|\\{BLUR\\}|\\{\\/BLUR\\}` +
-      `|\\{FLICKER\\}|\\{\\/FLICKER\\}` +
+      `|\\{FLICKER\\}|\\{\\/FLICKER\\}|\\{GRAD\\}|\\{\\/GRAD\\}` +
       `|\\*\\*?|_(?!_)|~~?|~(?!~))`, 'g'
     );
 
     const state = {
       bold:false,italic:false,underline:false,strike:false,
       big:false,small:false,glitch:false,glow:false,shake:false,wave:false,
-      outline:false,rainbow:false,neon:false,blur:false,flicker:false,
+      outline:false,rainbow:false,neon:false,blur:false,flicker:false,grad:false,
       // ── активные рамки v5.4 (17 шт) ────────────
       box:false,boxtape:false,
       boxsub:false,boxthird:false,boxmark:false,boxcaption:false,boxquote:false,boxticker:false,boxslate:false,boxunderline:false,
@@ -685,6 +687,7 @@ const FxEditor = (() => {
         <button class="fxe-fxbtn fxe-shake"   data-fx="shake">◎ ТРЯСКА</button>
         <button class="fxe-fxbtn fxe-outline" data-fx="outline">○ КОНТУР</button>
         <button class="fxe-fxbtn fxe-rainbow" data-fx="rainbow">✦ РАДУГА</button>
+        <button class="fxe-fxbtn fxe-grad"    data-fx="grad">▨ ГРАДИЕНТ</button>
         <button class="fxe-fxbtn fxe-flicker" data-fx="flicker">↯ МЕРЦАНИЕ</button>
         <button class="fxe-fxbtn fxe-blur2"   data-fx="blur">◌ БЛЮР</button>
       </div>
@@ -874,6 +877,7 @@ const FxEditor = (() => {
 .fxe-glow    { color:#e8ff00!important;text-shadow:0 0 6px #e8ff00; }
 .fxe-outline { -webkit-text-stroke:1px #e8ff00;color:transparent!important; }
 .fxe-rainbow { background:linear-gradient(90deg,#f90,#f3f,#3cf);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
+.fxe-grad    { background:linear-gradient(105deg,#7ad1ff,#fff,#ffcf6a);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
 .fxe-neon    { color:#b14fff!important;text-shadow:0 0 8px #b14fff; }
 .fxe-flicker { animation:fxeFlick .4s step-end infinite; }
 @keyframes fxeFlick { 0%,100%{opacity:1} 50%{opacity:.2} }
@@ -1262,6 +1266,7 @@ const FxEditor = (() => {
 .fxe-tok-wave      { animation:fxeWav .9s ease-in-out infinite; }
 .fxe-tok-outline   { -webkit-text-stroke:1px #e8ff00;color:transparent; }
 .fxe-tok-rainbow   { background:linear-gradient(90deg,#f90,#f3f,#3cf);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
+.fxe-tok-grad      { background:linear-gradient(105deg,#7ad1ff,#fff,#ffcf6a);-webkit-background-clip:text;-webkit-text-fill-color:transparent; }
 .fxe-tok-neon      { color:#b14fff;text-shadow:0 0 10px #b14fff; }
 .fxe-tok-blur      { filter:blur(2px); }
 .fxe-tok-flicker   { animation:fxeFlick .4s step-end infinite; }
