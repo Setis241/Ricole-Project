@@ -175,6 +175,8 @@ const App = (() => {
     let _textX = 0, _textY = 0;
     // Безопасная зона кадра: и сетка позиций, и bounds для TextRenderer.
     let _safe = { x: 0, y: 0, w: cw, h: ch };
+    // Силуэт персонажа: маска, которую построчный путь вычитает из зоны.
+    let _shapeAt = null;
 
     if (activeIdx >= 0 && activeIdx < lyrics.length) {
       _lyric   = lyrics[activeIdx];
@@ -243,8 +245,8 @@ const App = (() => {
          головой и под плечом место есть, на уровне корпуса — нет. Фигуры
          нет или профиль не читается — режимы работают как раньше, по
          полосе. */
-      const _shapeAt = (typeof BackgroundEngine !== 'undefined' &&
-                        BackgroundEngine.getCharacterShape)
+      _shapeAt = (typeof BackgroundEngine !== 'undefined' &&
+                  BackgroundEngine.getCharacterShape)
         ? BackgroundEngine.getCharacterShape(cw, ch, activeIdx) : null;
 
       /* Диагностика кадра. Спорить о том, что происходит с текстом, по
@@ -409,7 +411,7 @@ const App = (() => {
           textX, textY,
           _animResult, _fadeA,
           _effectiveColor, _effectiveFont, _effectiveSize, cw, t,
-          params.globalBoxId, safe
+          params.globalBoxId, safe, _shapeAt
         );
 
         // ── Перевод строки ──────────────────────

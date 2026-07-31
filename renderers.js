@@ -1080,6 +1080,42 @@ const TextRenderer = (() => {
     return { x: 0, y: 0, w: canvasWidth, h: Infinity };
   }
 
+  /* ── Маска: вычитаем из зоны силуэт персонажа ────────────────────────────
+     shapeAt(y) → {x0,x1} — занятый по горизонтали кусок на высоте y
+     (BackgroundEngine.getCharacterShape). До сих пор силуэт знал только
+     word-layout; построчный путь рисовал прямо сквозь героя.
+
+     Строка занимает не одну высоту, а полосу, поэтому профиль снимается
+     несколькими пробами и берётся ХУДШИЙ случай: иначе на кадре, где
+     персонаж сужается, текст заедет ему на плечо.
+
+     Из двух свободных сторон берём широкую. Если персонаж съедает почти всю
+     зону, маска отключается: лучше текст поверх героя, чем нечитаемая
+     колонка в два символа шириной. */
+  function maskedArea(area, shapeAt, cy, fontSize) {
+    if (typeof shapeAt !== 'function') return area;
+
+    const band = Math.max(fontSize * 1.6, area.h * 0.18);
+    let x0 = Infinity, x1 = -Infinity;
+    for (let i = 0; i < 7; i++) {
+      const sp = shapeAt(cy - band / 2 + band * (i / 6));
+      if (!sp) continue;
+      x0 = Math.min(x0, sp.x0); x1 = Math.max(x1, sp.x1);
+    }
+    if (!(x0 < Infinity)) return area;   // на этой высоте персонажа нет
+
+    const R = area.x + area.w;
+    const gap    = area.w * 0.02;        // воздух между текстом и силуэтом
+    const leftW  = Math.max(0, Math.min(x0, R) - area.x - gap);
+    const rightW = Math.max(0, R - Math.max(x1, area.x) - gap);
+
+    if (Math.max(leftW, rightW) < area.w * 0.25) return area;
+
+    return leftW >= rightW
+      ? { x: area.x, y: area.y, w: leftW, h: area.h }
+      : { x: Math.max(x1, area.x) + gap, y: area.y, w: rightW, h: area.h };
+  }
+
   // Максимальная ширина строки среди rows при данном размере шрифта
   function rowsMaxWidth(ctx, rows, baseFontSize, font) {
     const WORD_GAP = baseFontSize * 0.35;
@@ -1096,7 +1132,7 @@ const TextRenderer = (() => {
   }
 
   /* ── Main draw ── */
-  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null) {
+  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null, shapeAt=null) {
     // lyric.text уже очищен парсером (без /commands/, без {LFONT:...}, без empty-маркеров).
     // НИ В КОЕМ СЛУЧАЕ не фолбэчимся на rawText — пустой text это намеренное состояние
     // (техническая строка / маркер «(пусто)») и текст не должен рисоваться.
@@ -1133,7 +1169,7 @@ const TextRenderer = (() => {
     // area — внутренняя область рамки (или весь холст, если рамок нет).
     // Перенос строк, авто-уменьшение шрифта и клампинг центра считаются
     // относительно неё, поэтому куплет не вылезает за пределы кадра.
-    const area     = resolveArea(bounds, canvasWidth);
+    const area     = maskedArea(resolveArea(bounds, canvasWidth), shapeAt, cy, fontSize);
     const padding  = area.w*0.04;
     // Учитываем максимальный возможный scaleX (обычно до 2.2x), чтобы текст не вылезал за границы
     // но при этом не перестраивался во время анимации
@@ -1361,7 +1397,7 @@ const TextRenderer = (() => {
     if (anim && anim._scrollDupe) {
       const { dx, dy } = anim._scrollDupe;
       const animDupe = { ...anim, offsetX: offsetX + dx, offsetY: offsetY + dy, _scrollDupe: null };
-      draw(ctx, lyric, cx, cy, animDupe, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds);
+      draw(ctx, lyric, cx, cy, animDupe, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt);
     }
 
     // Возвращаем реальную нижнюю границу текста в canvas-координатах.

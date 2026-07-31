@@ -724,10 +724,15 @@ const ExportEngine = (() => {
           if (_exportAnchorX != null) textX = w * (_exportAnchorX / 100);
           if (_exportAnchorY != null) textY = h * (_exportAnchorY / 100);
 
+          // Тот же силуэт, что и в превью: без него экспорт положит строку
+          // поверх персонажа, хотя на экране она его обходила.
+          const _expShape = BackgroundEngine.getCharacterShape
+            ? BackgroundEngine.getCharacterShape(w, h, activeIdx) : null;
+
           const mainBottom = TextRenderer.draw(
             offCtx, _exportLyric, textX, textY,
             _exportAnim, _exportFadeA,
-            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId, safe
+            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId, safe, _expShape
           );
 
           // ── Перевод строки ──────────────────────────
