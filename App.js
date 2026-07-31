@@ -45,6 +45,19 @@ const App = (() => {
   let rafId     = null;
   let lastT     = 0;
 
+  /* Снимок последнего отрисованного кадра — для window.RicoleDebug().
+     Объявлен на уровне модуля, а не внутри цикла: иначе функция-читалка
+     существует только когда играет строка, и позвать её в нужный момент
+     невозможно. */
+  let _debugSnap = null;
+  if (typeof window !== 'undefined') {
+    window.RicoleDebug = function() {
+      const g = (typeof TextRenderer !== 'undefined') ? TextRenderer.lastFrameGuard : null;
+      if (!_debugSnap) return 'кадр с текстом ещё не рисовался — включи воспроизведение';
+      return Object.assign({}, _debugSnap, { страховкаКадра: g });
+    };
+  }
+
   // ── Resolution map
   const RES = {
     '3840x2160': [3840, 2160],
@@ -157,6 +170,9 @@ const App = (() => {
     let _fadeA = 0, _ls = null;
     let _effectiveFont = params.font, _effectiveSize = params.fontSize;
     let _effectiveColor = params.color, _effectivePos = params.textPosition;
+    // Где строка реально стоит. Считается один раз (см. ниже) и используется
+    // и для ширины полосы, и для отрисовки.
+    let _textX = 0, _textY = 0;
 
     if (activeIdx >= 0 && activeIdx < lyrics.length) {
       _lyric   = lyrics[activeIdx];
@@ -176,6 +192,64 @@ const App = (() => {
       const words  = _lyric.text
         ? _lyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
         : [];
+      /* Ширина колонки, отведённой строке — симметричная полоса вокруг той
+         точки, где строка РЕАЛЬНО стоит.
+
+         Здесь была прямая ошибка: полоса считалась от {LPOSX} с дефолтом 50
+         («строка по центру кадра»), а фактический центр брался ниже совсем
+         из другого места — из сетки {LPOS}, где 'center-left' это 0.15
+         ширины. Полоса шириной 0.95 кадра вокруг точки 0.15 выходит за
+         левый край на треть кадра. Режим честно держался полосы — и текст
+         всё равно вываливался за рамку, потому что врала сама полоса.
+
+         Поэтому позиция строки вычисляется ОДИН раз и до раскладки, и
+         полоса выводится из неё. Дальше эта же _textX/_textY уходит в
+         отрисовку — двух источников правды о том, где стоит строка, быть
+         не должно. */
+      _textX = cw / 2; _textY = ch / 2;
+      {
+        const p = _effectivePos || 'center';
+        if (p.endsWith('-left'))  _textX = cw * 0.15;
+        if (p.endsWith('-right')) _textX = cw * 0.85;
+        if (p.startsWith('top'))    _textY = ch * 0.15;
+        if (p.startsWith('bottom')) _textY = ch * 0.85;
+        // Числовой якорь перебивает сетку: он ставит строку относительно
+        // фигуры в кадре, а не «в позицию кадра».
+        if (_ls && _ls.anchorX != null) _textX = cw * (_ls.anchorX / 100);
+        if (_ls && _ls.anchorY != null) _textY = ch * (_ls.anchorY / 100);
+      }
+      const _maxLineW = 2 * Math.min(_textX, cw - _textX) * 0.95;
+
+      /* Силуэт фигуры для этой строки. Режим получает не прямоугольник, а
+         функцию «что занято на этой высоте» и строит набор по ФОРМЕ: над
+         головой и под плечом место есть, на уровне корпуса — нет. Фигуры
+         нет или профиль не читается — режимы работают как раньше, по
+         полосе. */
+      const _shapeAt = (typeof BackgroundEngine !== 'undefined' &&
+                        BackgroundEngine.getCharacterShape)
+        ? BackgroundEngine.getCharacterShape(cw, ch, activeIdx) : null;
+
+      /* Диагностика кадра. Спорить о том, что происходит с текстом, по
+         скриншотам нельзя: пиксель на скриншоте не измеришь, а масштаб
+         превью меняется от размера окна. Здесь копится снимок ФАКТИЧЕСКИХ
+         чисел кадра; читать его — window.RicoleDebug() в консоли. */
+      _debugSnap = {
+        кадр:            cw + '×' + ch,
+        строка:          (_lyric && _lyric.text) || '',
+        режимСтроки:     (_ls && _ls.animMode) || ('из списка: ' + params.animMode),
+        кегльLSIZE:      _effectiveSize,
+        точкаСтроки:     Math.round(_textX) + ',' + Math.round(_textY),
+        полосаMaxLineW:  Math.round(_maxLineW),
+        силуэтНайден:    !!_shapeAt,
+        силуэтНаВысотеСтроки: _shapeAt
+          ? (function() {
+              const sp = _shapeAt(_textY);
+              return sp ? ('занято ' + Math.round(sp.x0) + '…' + Math.round(sp.x1))
+                        : 'на этой высоте фигуры нет';
+            })()
+          : 'профиль не построен',
+      };
+
       _animResult = modeFn({
         bands, t, params, springs,
         words,
@@ -186,6 +260,12 @@ const App = (() => {
         fontSize: _effectiveSize,
         ctx,
         font:     _effectiveFont,
+        maxLineW: _maxLineW,
+        // Раскладка ведётся от точки строки, а профиль — от кадра:
+        // отдаём режиму и точку, чтобы он мог перевести одно в другое.
+        originX:  _textX,
+        originY:  _textY,
+        shapeAt:  _shapeAt,
       });
 
       // ── Применяем camera override к фону (montage и др.) ──
@@ -219,6 +299,9 @@ const App = (() => {
     // Иначе при использовании BackgroundManager (per-line bg) BackgroundEngine.draw
     // не вызывается, blend застревает на 0 и сцена не видна.
     if (BackgroundEngine.tickLineScene) BackgroundEngine.tickLineScene(dt);
+    // textCam decay тикается ПОСЛЕ отрисовки фона (см. ниже) — чтобы
+    // setTextDrivenCamera({k=1}) → draw читает k=1 (как в legacy drawMedia),
+    // и только потом decay для следующего кадра.
 
     // Оборачиваем рендер фона сценическим transform (если активна кам-сцена).
     // Эффект применяется ОДИНАКОВО и к BackgroundManager, и к BackgroundEngine,
@@ -226,6 +309,19 @@ const App = (() => {
     const _sceneApplied = BackgroundEngine.applySceneTransform
       ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t)
       : false;
+
+    // ── ENDING SEQUENCE: получаем состояние затухания и громкости ──
+    const endingState = BackgroundEngine.getEndingState
+      ? BackgroundEngine.getEndingState(t)
+      : { active: false, contentAlpha: 1, audioVolume: 1 };
+    // Применяем громкость к audio
+    if (AudioEngine.setGain) AudioEngine.setGain(endingState.audioVolume);
+    // Если ending активен, оборачиваем весь рендер контента в globalAlpha=contentAlpha
+    const _contentSaved = endingState.active && endingState.contentAlpha < 1;
+    if (_contentSaved) {
+      ctx.save();
+      ctx.globalAlpha = endingState.contentAlpha;
+    }
 
     if (BackgroundManager.hasEntries) {
       // Менеджер фонов: тикаем + рисуем активный entry с per-bg настройками
@@ -239,6 +335,11 @@ const App = (() => {
       ctx.fillStyle = '#0a0a0a';
       ctx.fillRect(0, 0, cw, ch);
     }
+    // Decay text-driven camera ПОСЛЕ отрисовки фона: рендер этого кадра
+    // прочитал _decay=1 (свежий), а decay подготавливает следующий кадр.
+    // Если на следующем кадре setTextDrivenCamera снова вызовется — _decay
+    // опять станет 1. Если нет — за ~150мс плавно затухнет до 0.
+    if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
     if (_sceneApplied) ctx.restore();
 
@@ -252,21 +353,36 @@ const App = (() => {
     // drawOverlaysAll рендерит объекты в порядке массива,
     // вставляя текст между последним 'below' и первым 'above' объектом.
     const currentLyric = _lyric;
+
+    // ── Передний план едет с той же камерой, что и фон ──
+    // Раньше сцена камеры оборачивала ТОЛЬКО фон: объекты и текст висели на
+    // неподвижной плоскости, и кадр читался как два несвязанных слоя —
+    // сзади кино, спереди наклейки. Камера снимает сцену целиком, поэтому
+    // передний план получает ту же трансформацию, но ослабленную: тот же
+    // ритм и та же фаза удара, меньшая амплитуда. Это и есть параллакс —
+    // и именно он склеивает фон, спрайт и текст в один кадр.
+    // Персонаж стоит В СЦЕНЕ, а не поверх неё, поэтому он едет с камерой
+    // почти как фон — за это отвечает ov.camFollow. Чтобы движок мог
+    // применить свою камеру к такому объекту, ему нужна матрица холста ДО
+    // общей камеры переднего плана: отсюда и передаём.
+    const FOREGROUND_CAM = 0.28;
+    if (BackgroundEngine.setForegroundCam) {
+      BackgroundEngine.setForegroundCam(
+        (ctx.getTransform ? ctx.getTransform() : null), FOREGROUND_CAM);
+    }
+    const _fgApplied = BackgroundEngine.applySceneTransform
+      ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t, FOREGROUND_CAM)
+      : false;
+
     BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, () => {
       // ── Text ──────────────────────────────────
       if (_lyric && _animResult) {
         // 9-позиционная сетка: top/center/bottom × left/center/right
-        // X: 0.15 / 0.50 / 0.85 от ширины
-        // Y: 0.15 / 0.50 / 0.85 от высоты
-        // legacy: 'top'/'center'/'bottom' = центральная колонка
-        let textX = cw / 2;
-        let textY = ch / 2;
-        const p = _effectivePos || 'center';
-        if (p.endsWith('-left'))  textX = cw * 0.15;
-        if (p.endsWith('-right')) textX = cw * 0.85;
-        if (p.startsWith('top'))    textY = ch * 0.15;
-        if (p.startsWith('bottom')) textY = ch * 0.85;
-        // explicit 'top' / 'bottom' (без -left/-right) — центрированы по X (textX=cw/2 default)
+        /* Позиция уже посчитана до раскладки — там же, где из неё выведена
+           ширина полосы (_maxLineW). Считать её здесь второй раз значит
+           завести второй источник правды: именно так полоса и разошлась с
+           фактическим местом строки. */
+        const textX = _textX, textY = _textY;
 
         const mainBottom = TextRenderer.draw(
           ctx, _lyric,
@@ -292,8 +408,20 @@ const App = (() => {
       }
     });
 
+    // Снимаем камеру переднего плана — леттербокс и ending рисуются
+    // по краям кадра и двигаться вместе со сценой не должны.
+    if (_fgApplied) ctx.restore();
+
     // ── Letterbox (поверх всего)
     BackgroundEngine.drawLetterboxLayer(ctx, cw, ch, bands, dt);
+
+    // Закрываем content-alpha обёртку, начатую перед фоном (для ending fade)
+    if (_contentSaved) ctx.restore();
+
+    // ── ENDING OVERLAY (поверх всего, не подверженный fade) ──
+    if (endingState.active && BackgroundEngine.drawEnding) {
+      BackgroundEngine.drawEnding(ctx, cw, ch, t);
+    }
 
     // ── VU & Spectrum
     updateMeters(bands, freqData, t);
@@ -343,6 +471,12 @@ const App = (() => {
     // Передаём в BackgroundManager для UI выбора строк (timeline-scope)
     if (typeof BackgroundManager !== 'undefined') {
       BackgroundManager.setLines(lyrics);
+    }
+    // Ищем ending-маркер ([конец] / [end] / /КОНЕЦ ВИДЕО/) и регистрируем в Engine
+    if (BackgroundEngine.setEndingMarker) {
+      const end = lyrics.find(l => l.isEnding);
+      if (end) BackgroundEngine.setEndingMarker(end.time);
+      else     BackgroundEngine.clearEndingMarker();
     }
   }
 

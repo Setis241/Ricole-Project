@@ -97,6 +97,25 @@ class SpringPhysics {
  * возвращает приблизительную ширину. Это fallback, но в нормальных
  * условиях App.js и ExportEngine передают оба параметра.
  */
+/**
+ * Плавный порог реакции на бас.
+ *
+ * Почти везде реакция включалась жёстким `if (bassOver > 0.2)`. Бас — сигнал
+ * шумный и вокруг порога он ходит туда-сюда по нескольку раз в секунду, а
+ * значит эффект включался и выключался на полную амплитуду: слово начинало
+ * мелко трястись и «пытаться трансформироваться под басы» вместо того чтобы
+ * ровно дышать. Здесь порог размазан по ширине width, так что около него
+ * эффект нарастает, а не щёлкает.
+ *
+ * Возвращает 0..1 (smoothstep).
+ */
+function _bassGate(bassOver, threshold, width = 0.12) {
+  const p = (bassOver - threshold) / width;
+  if (p <= 0) return 0;
+  if (p >= 1) return 1;
+  return p * p * (3 - 2 * p);
+}
+
 function _measureWordsPx(ctx, words, fontSize, font) {
   if (!ctx || typeof ctx.measureText !== 'function' || !font) {
     return words.map(w => w.length * fontSize * 0.55);   // fallback
@@ -106,6 +125,173 @@ function _measureWordsPx(ctx, words, fontSize, font) {
   const widths = words.map(w => ctx.measureText(w).width);
   ctx.font = prevFont;
   return widths;
+}
+
+/**
+ * Перенос слов по реальной ширине — общий набор для типографических режимов.
+ *
+ * Раньше такой перенос был вшит внутрь headline, и любой новый режим,
+ * которому нужен абзац, был обязан переписать его заново. Здесь он один:
+ * режимы отличаются ТЕМ, КАК блок появляется, а не тем, как он ломается на
+ * строки.
+ *
+ * Возвращает { lines, widths, lineOf, posInLine, lineW, numLines }.
+ * lines — массив массивов индексов слов.
+ */
+function _wrapWords(widths, wordGap, maxLineW) {
+  const n = widths.length;
+  const lineOf = new Array(n);
+  const lines  = [];
+  let cur = [], curW = 0;
+  for (let i = 0; i < n; i++) {
+    const w    = widths[i];
+    const addW = cur.length ? wordGap + w : w;
+    if (cur.length && curW + addW > maxLineW) {
+      lines.push(cur); cur = [i]; curW = w;
+    } else {
+      cur.push(i); curW += addW;
+    }
+  }
+  if (cur.length) lines.push(cur);
+  const numLines  = lines.length;
+  const lineW     = new Array(numLines);
+  const posInLine = new Array(n);
+  lines.forEach((idxs, li) => {
+    let w = 0;
+    idxs.forEach((idx, k) => {
+      w += widths[idx] + (k ? wordGap : 0);
+      lineOf[idx] = li; posInLine[idx] = k;
+    });
+    lineW[li] = w;
+  });
+  return { lines, lineOf, posInLine, lineW, numLines };
+}
+
+/**
+ * Перенос с ГАРАНТИЕЙ нескольких рядов.
+ *
+ * Приёмы, которые живут на многорядном блоке (лесенка отступов, выключка по
+ * формату), на однорядной строке просто исчезают: остаётся голый заезд
+ * сбоку — то есть ровно тот скучный выезд, вместо которого они и заводились.
+ * А куплетная строка почти всегда короткая и в полосу влезает целиком.
+ *
+ * Поэтому мера сужается до тех пор, пока строка не разложится минимум на
+ * два ряда. Это не костыль, а решение набора: выноску и врез набирают узкой
+ * колонкой именно для того, чтобы у блока была форма.
+ *
+ * Слов меньше minWords — оставляем один ряд: ломать пополам две штуки
+ * бессмысленно, там форму держит сам кегль.
+ */
+function _wrapAtLeast(widths, wordGap, band, minRows = 2, minWords = 4) {
+  let r = _wrapWords(widths, wordGap, band);
+  r.measure = band;
+  if (widths.length < minWords || r.numLines >= minRows) return r;
+  let measure = band;
+  for (let k = 0; k < 6 && r.numLines < minRows; k++) {
+    measure *= 0.80;
+    // Ряд не может быть уже самого длинного слова — иначе перенос
+    // перестаёт что-либо менять и цикл крутится впустую.
+    const widest = Math.max.apply(null, widths);
+    if (measure < widest * 1.05) break;
+    r = _wrapWords(widths, wordGap, measure);
+  }
+  r.measure = measure;
+  return r;
+}
+
+/**
+ * Устойчивый номер варианта раскладки для строки.
+ *
+ * Режим играет всю секцию (так задумано: у эпизода свой голос), но если
+ * раскладка внутри режима одна на все строки, четыре строки подряд встают
+ * одинаково — приём приедается на второй же. Вариант считается ИЗ САМОГО
+ * ТЕКСТА: соседние строки почти всегда дают разные варианты, а одна и та же
+ * строка — всегда один и тот же.
+ *
+ * Брать сюда время или счётчик кадров нельзя: раскладка пересчитывается
+ * каждый кадр, и любой нестабильный источник превратит вариант в мигание.
+ */
+function _variantOf(words, count) {
+  let h = 2166136261;
+  for (let i = 0; i < words.length; i++) {
+    const w = words[i];
+    for (let j = 0; j < w.length; j++) {
+      h ^= w.charCodeAt(j);
+      h = (h * 16777619) >>> 0;
+    }
+  }
+  /* Финальное перемешивание обязательно. Без него у FNV-1a слабые МЛАДШИЕ
+     биты, а `% count` при count = степени двойки берёт именно их: на
+     четырёх вариантах восемь разных строк подряд давали один и тот же
+     вариант — то есть «вариативность» не работала вовсе. Сдвиг с xor
+     разгоняет старшие биты вниз, и остаток начинает разбрасывать. */
+  /* Math.imul, а не обычное умножение: произведение двух 32-битных чисел
+     выходит за 2^53, обычное умножение теряет точность, а последующий xor
+     переводит результат в ЗНАКОВЫЙ int32 — вариант получался отрицательным
+     и индексация раскладок ломалась. imul даёт честную 32-битную
+     арифметику, финальный >>> 0 возвращает беззнаковое. */
+  h ^= h >>> 15;
+  h = Math.imul(h, 2246822507) >>> 0;
+  h = (h ^ (h >>> 13)) >>> 0;
+  return h % count;
+}
+
+/**
+ * Свободная полоса на заданной высоте — с учётом СИЛУЭТА фигуры.
+ *
+ * Прямоугольный габарит спрайта врёт: у фигуры есть воздух над головой и
+ * просветы у плеча, и текст, обрезанный по габариту, обрывается там, где
+ * ещё ничего не нарисовано. Здесь берётся реальный контур: на высоте, где
+ * фигуры нет, отдаётся весь кадр; где есть — кадр минус её контур.
+ *
+ * tuck — насколько текст заходит ПОД фигуру. Фигура рисуется поверх набора
+ * (маска), поэтому хвост слова, уходящий ей за спину, — приём, а не авария.
+ *
+ * Координаты — в системе режима, то есть от точки строки (originX).
+ * Возвращает { a, b } — левую и правую границы относительно неё.
+ */
+function _freeSpanAt(o, yLocal) {
+  const cw = o.canvasW;
+  const ox = (typeof o.originX === 'number') ? o.originX : cw / 2;
+  const oy = (typeof o.originY === 'number') ? o.originY : o.canvasH / 2;
+  /* Поле кадра. Было 2% — буква вставала почти вплотную к границе, и это
+     читается так же сломанно, как выход за неё. */
+  const margin = cw * 0.045;
+  let a = margin - ox, b = cw - margin - ox;      // весь кадр по умолчанию
+
+  const shape = o.shapeAt;
+  if (typeof shape === 'function') {
+    const sp = shape(oy + yLocal);
+    if (sp) {
+      const tuck = (typeof o.tuck === 'number') ? o.tuck : cw * 0.06;
+      const x0 = sp.x0 - ox, x1 = sp.x1 - ox;
+      // Фигура делит кадр — берём ту часть, что шире, и подкладываем под
+      // фигуру ещё tuck: так набор не обрывается ровно по контуру.
+      const leftW  = x0 - a;
+      const rightW = b - x1;
+      if (leftW >= rightW) b = Math.min(b, x0 + tuck);
+      else                 a = Math.max(a, x1 - tuck);
+    }
+  }
+  if (b - a < cw * 0.12) {           // фигура съела почти всё — не верстаем в щель
+    const mid = (a + b) / 2;
+    a = mid - cw * 0.06; b = mid + cw * 0.06;
+  }
+  return { a: a, b: b };
+}
+
+/* Ширина полосы набора: её задаёт вызывающий (текст живёт в своей колонке,
+   а не во всём кадре — см. {LPOSX} в AutoDirector). Фолбэк — для ручного
+   применения режима, когда полосу никто не считал. */
+function _measureBand(maxLineWIn, canvasW) {
+  return (typeof maxLineWIn === 'number' && maxLineWIn > 40)
+    ? maxLineWIn : canvasW * 0.82;
+}
+
+/* Вертикальный шаг строк, сжатый под безопасную высоту кадра. */
+function _lineStep(numLines, fontSize, canvasH, gapMul = 1.22, fill = 0.62) {
+  const raw = fontSize * gapMul;
+  return numLines > 1 ? Math.min(raw, (canvasH * fill) / (numLines - 1)) : raw;
 }
 
 /**
@@ -581,9 +767,8 @@ const AnimModes = {
       if (rawProg >= 1) {
         scale   *= 1 + bassOver * 0.12;      // уменьшил с 0.14 — стабильнее
         yOffset += Math.sin(i * 0.7 + t * 2.1) * 1.4;
-        if (bassOver > 0.25) {
-          wobble += Math.sin(t * 22 + i * 1.7) * bassOver * fontSize * 0.03;
-        }
+        wobble += Math.sin(t * 22 + i * 1.7) * bassOver * fontSize * 0.03
+                  * _bassGate(bassOver, 0.25);
       }
 
       return {
@@ -1494,32 +1679,41 @@ const AnimModes = {
       } else if (τ < 0.58) {
         // HOLD: hero display
         const p = (τ - 0.32) / 0.26;
-        // Небольшой "breathing" + сильная реакция на бас
-        const breathe = 1 + Math.sin(t * 4.1) * 0.02;
+        // Декоративные колебания (дыхание, бас, покачивание) ВВОДЯТСЯ ПЛАВНО.
+        // Раньше они включались на границе фазы сразу на полную амплитуду:
+        // предыдущая фаза заканчивалась с чистым значением, а эта начиналась
+        // со случайной фазы синуса — слово дёргалось на каждом стыке.
+        const holdW = Math.min(p / 0.35, 1);
+        const breathe = 1 + Math.sin(t * 4.1) * 0.02 * holdW;
         const settleOvershoot = (1 - p) * 0.08;           // overshoot остаток тает
-        scale  = heroSc * (1 + settleOvershoot) * breathe * (1 + bassOver * 0.14);
+        scale  = heroSc * (1 + settleOvershoot) * breathe * (1 + bassOver * 0.14 * holdW);
         alpha  = 1;
         // Лёгкое idle-движение
-        x = (hash(i + 1, 41) - 0.5) * fontSize * 0.25 + Math.sin(t * 2.7) * fontSize * 0.02;
-        y = (hash(i + 1, 43) - 0.5) * fontSize * 0.30 + Math.cos(t * 3.3) * fontSize * 0.015;
-        rotation = Math.sin(t * 1.9 + i) * 0.02;
-        // Bass-jitter только на пиках
-        if (bassOver > 0.25) {
-          x += Math.sin(t * 22 + i * 1.7) * bassOver * fontSize * 0.04;
-          rotation += Math.sin(t * 17 + i) * bassOver * 0.04;
-        }
+        x = (hash(i + 1, 41) - 0.5) * fontSize * 0.25 + Math.sin(t * 2.7) * fontSize * 0.02 * holdW;
+        y = (hash(i + 1, 43) - 0.5) * fontSize * 0.30 + Math.cos(t * 3.3) * fontSize * 0.015 * holdW;
+        rotation = Math.sin(t * 1.9 + i) * 0.02 * holdW;
+        // Bass-jitter только на пиках (порог плавный — см. _bassGate)
+        const jitterW = _bassGate(bassOver, 0.25) * holdW;
+        x += Math.sin(t * 22 + i * 1.7) * bassOver * fontSize * 0.04 * jitterW;
+        rotation += Math.sin(t * 17 + i) * bassOver * 0.04 * jitterW;
       } else if (τ < 0.85) {
         // DEPART: hero → idle position & size
         const p        = (τ - 0.58) / 0.27;
         const easedOut = 1 - Math.pow(1 - p, 2.2);
-        scale  = heroSc + (idle.scale - heroSc) * easedOut;
+        // Те же колебания, что были в HOLD, здесь ГАСНУТ плавно. Иначе на
+        // границе τ=0.58 они пропадали разом и слово скачком меняло и кегль
+        // (терялся басовый множитель), и положение.
+        const departW = 1 - Math.min(p / 0.35, 1);
+        const breathe = 1 + Math.sin(t * 4.1) * 0.02 * departW;
+        scale  = (heroSc + (idle.scale - heroSc) * easedOut)
+                 * breathe * (1 + bassOver * 0.14 * departW);
         alpha  = 1;
         // Позиция интерполируется от hero-offset к idle-point
         const heroX = (hash(i + 1, 41) - 0.5) * fontSize * 0.25;
         const heroY = (hash(i + 1, 43) - 0.5) * fontSize * 0.30;
-        x = heroX * (1 - easedOut) + idle.x * easedOut;
-        y = heroY * (1 - easedOut) + idle.y * easedOut;
-        rotation = idle.rotation * easedOut;
+        x = heroX * (1 - easedOut) + idle.x * easedOut + Math.sin(t * 2.7) * fontSize * 0.02 * departW;
+        y = heroY * (1 - easedOut) + idle.y * easedOut + Math.cos(t * 3.3) * fontSize * 0.015 * departW;
+        rotation = idle.rotation * easedOut + Math.sin(t * 1.9 + i) * 0.02 * departW;
       } else {
         // IDLE: в финальной позиции, затемняется при активном hero
         scale    = idle.scale;
@@ -1527,14 +1721,20 @@ const AnimModes = {
         x = idle.x;
         y = idle.y;
 
+        // Всё, что живёт только в IDLE, вводится плавно за 0.18 с после
+        // приземления: на границе τ=0.85 предыдущая фаза оставляет слово
+        // ровно в idle-точке, и любая добавка на полной амплитуде читается
+        // как рывок.
+        const idleW = Math.min((τ - 0.85) / 0.18, 1);
+
         // Idle sway — у каждого своя фаза
         const swayPhase = t * (1.1 + hash(i + 1, 37) * 1.4) + i * 0.7;
-        x += Math.sin(swayPhase)        * fontSize * 0.035;
-        y += Math.cos(swayPhase * 1.15) * fontSize * 0.025;
-        rotation += Math.sin(swayPhase * 0.6) * 0.025;
+        x += Math.sin(swayPhase)        * fontSize * 0.035 * idleW;
+        y += Math.cos(swayPhase * 1.15) * fontSize * 0.025 * idleW;
+        rotation += Math.sin(swayPhase * 0.6) * 0.025 * idleW;
 
         // Bass-pulse на idle (слабее чем на hero)
-        scale *= 1 + bassOver * 0.08;
+        scale *= 1 + bassOver * 0.08 * idleW;
 
         // ═══════════════════════════════════════════════
         // SHOCKWAVE: каждый активный hero отталкивает idle-слова от своего центра
@@ -1564,20 +1764,23 @@ const AnimModes = {
           const falloff = fontSize * 3 / (fontSize * 3 + dist);
           const push    = pulse * falloff * fontSize * 0.22;
 
-          x += dirX * push;
-          y += dirY * push;
-          shockScaleMul *= 1 - pulse * falloff * 0.08;            // мини-контракт scale
+          x += dirX * push * idleW;
+          y += dirY * push * idleW;
+          shockScaleMul *= 1 - pulse * falloff * 0.08 * idleW;    // мини-контракт scale
         }
         scale *= shockScaleMul;
 
         // ── DIMMING: если где-то есть активный hero, я тускнею ──
         // Плавная интерполяция 1.0 → 0.32 в зависимости от интенсивности
         const dim = otherHeroActivity(i);
-        alpha = 1 - dim * 0.68;   // 1.0 при отсутствии, 0.32 при полном hero
+        let idleAlpha = 1 - dim * 0.68;   // 1.0 при отсутствии, 0.32 при полном hero
 
         // Под басом слегка подсвечиваются idle
-        alpha += bassOver * 0.12 * (1 - dim);
-        alpha = Math.max(0, Math.min(1, alpha));
+        idleAlpha += bassOver * 0.12 * (1 - dim);
+        idleAlpha = Math.max(0, Math.min(1, idleAlpha));
+        // Предыдущая фаза заканчивается на alpha = 1, поэтому затемнение
+        // тоже вводим плавно — иначе слово мигает яркостью при приземлении.
+        alpha = 1 + (idleAlpha - 1) * idleW;
       }
 
       return { word, x, y, scale, alpha, rotation };
@@ -2152,99 +2355,146 @@ const AnimModes = {
   },
 
   /* ═══════════════════════════════════════════════
-     STACK — «Живая пресс-доска»
-     Слова разного размера падают сверху и складываются стопкой как
-     газетные вырезки — каждое на своей строке, со случайным наклоном,
-     как будто их бросили на стол. Бас заставляет всю стопку сотрясаться.
+     STACK — «Пресс-доска»
+     Слова падают сверху и складываются стопкой, каждое на своей строке,
+     с лёгким наклоном — как вырезки, брошенные на стол.
 
-     Это НЕ построение строки — это коллаж, журнальный разворот.
-     Каждое слово — отдельный объект в стеке, живёт в 2D.
+     Переписан целиком. Что было не так в прежней версии:
+
+       • размер слова брался случайным хешем по бимодальному закону
+         (либо 0.5–0.9, либо 1.2–2.2). Соседние строки различались втрое,
+         причём произвольно: длинное слово могло стать крошечным и стать
+         нечитаемым, короткое — занять весь кадр. Иерархия должна следовать
+         из текста, а не из генератора случайных чисел;
+       • размер никак не сверялся с шириной кадра — крупные слова уезжали
+         за край, и это же провоцировало наложения;
+       • движение собиралось из кусков с разрывами: отскок кегля, отдельный
+         y-удар, включение басовой реакции в момент приземления. На стыках
+         величины скакали, и слово «пыталось увеличиться второй раз»;
+       • басовая тряска включалась жёстким порогом, поэтому щёлкала
+         вкл/выкл несколько раз в секунду.
+
+     Здесь всё держится на одном принципе: у каждого слова ОДНА непрерывная
+     кривая появления, и все декоративные добавки умножаются на вес, который
+     нарастает от нуля после того, как слово уже стоит на месте. Разрывов
+     нет ни в одной величине.
   ═══════════════════════════════════════════════ */
   stack({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font }) {
     if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
     const n = words.length;
 
+    // Детерминированный шум — для наклона и мелкой небрежности.
     let seed = 0;
     for (const w of words) seed = (seed * 31 + w.charCodeAt(0)) | 0;
     seed = Math.abs(seed % 9973) + 1;
-    function hash(i, salt) {
+    const hash = (i, salt) => {
       let s = ((i * 2654435761) ^ (salt * seed * 1597334677)) | 0;
       s ^= s >>> 13; s = Math.imul(s, 0xc2b2ae35); s ^= s >>> 16;
       return (s >>> 0) / 4294967296;
-    }
+    };
 
-    // Размеры: слова разного «веса» как газетные заголовки
-    const scaleMult = words.map((_, i) => {
-      const r = hash(i + 1, 5);
-      // Бимодальное: либо крупный заголовок (1.4-2.2), либо мелкий подзаголовок (0.5-0.9)
-      return r < 0.35 ? 0.5 + r * 1.14 : 1.2 + (r - 0.35) * 1.54;
-    });
+    /* ── 1. ИЕРАРХИЯ РАЗМЕРОВ ──────────────────────────────
+       Вес слова считаем по его длине: длинное слово несёт больше смысла,
+       чем предлог. Ранжируем и растягиваем на диапазон 0.72…1.5 — контраст
+       заметный, но ни одно слово не проваливается в нечитаемое.
+       Разброс детерминирован текстом: одна и та же строка всегда
+       выглядит одинаково. */
+    const bare    = words.map(w => w.replace(/[^\p{L}\p{N}]/gu, ''));
+    const lens    = bare.map(w => w.length);
+    const minLen  = Math.min(...lens);
+    const maxLen  = Math.max(...lens);
+    const spread  = Math.max(1, maxLen - minLen);
+    const weight  = lens.map(L => 0.72 + ((L - minLen) / spread) * 0.78);
 
+    /* ── 2. ПОДГОНКА ПОД КАДР ──────────────────────────────
+       Меряем слова при базовом кегле и урезаем веса так, чтобы самое
+       широкое слово укладывалось в safeW, а вся стопка — в safeH.
+       Без этого крупные слова вылезали за край. */
+    const safeW = canvasW * 0.88;
+    const safeH = canvasH * 0.80;
     const baseWidths = _measureWordsPx(ctx, words, fontSize, font);
-    const bassOver   = Math.max(0, bands.bass - 0.30) * params.bassSens;
 
-    // Укладываем слова сверху вниз: каждое слово занимает высоту = fontSize × scaleMult × 1.3
-    // Центруем весь стек по высоте
-    const rowHeights = scaleMult.map(s => fontSize * s * 1.35);
-    const totalStackH = rowHeights.reduce((a, b) => a + b, 0);
-    let stackCursor = -totalStackH / 2;
+    let capW = Infinity;
+    for (let i = 0; i < n; i++) {
+      const w = Math.max(baseWidths[i], fontSize * 0.3) * weight[i];
+      capW = Math.min(capW, safeW / w);
+    }
+    const ROW_GAP  = 1.28;                       // высота строки в кеглях
+    const sumW     = weight.reduce((a, b) => a + b, 0);
+    const capH     = safeH / (fontSize * ROW_GAP * sumW);
+    const fit      = Math.min(1, capW, capH);
+    const scaleAt  = weight.map(w => w * fit);
 
-    // Bass-дрожание всей стопки: единый вектор для все слов
-    const stackShakeX = bassOver > 0.2 ? Math.sin(t * 23 + 1) * bassOver * fontSize * 0.06 : 0;
-    const stackShakeY = bassOver > 0.2 ? Math.cos(t * 17 + 3) * bassOver * fontSize * 0.04 : 0;
-    const stackRot    = bassOver > 0.2 ? Math.sin(t * 11)     * bassOver * 0.025           : 0;
+    /* ── 3. РАСКЛАДКА ПО ВЕРТИКАЛИ ─────────────────────────
+       Высота строки пропорциональна РЕАЛЬНОМУ кеглю слова, поэтому
+       крупное слово получает больше места и соседи на него не налезают. */
+    const rowH   = scaleAt.map(s => fontSize * s * ROW_GAP);
+    const totalH = rowH.reduce((a, b) => a + b, 0);
+    const rowY   = [];
+    let cursor = -totalH / 2;
+    for (let i = 0; i < n; i++) { rowY.push(cursor + rowH[i] / 2); cursor += rowH[i]; }
+
+    /* ── 4. ТАЙМИНГ ────────────────────────────────────────
+       Слова приходят по очереди, укладываясь в отведённое строке время.
+       DROP — длительность самого падения, SETTLE — время, за которое после
+       остановки набирает силу «жизнь» (дыхание на бас). */
+    const DROP   = 0.30;
+    const SETTLE = 0.28;
+    const lastIn = Math.min(duration * 0.55, 1.15);
+    const stagger = n > 1 ? lastIn / (n - 1) : 0;
+
+    /* ── 5. БАС ────────────────────────────────────────────
+       Один общий вектор на всю стопку, порог плавный. */
+    const bassOver = Math.max(0, bands.bass - 0.30) * params.bassSens;
+    const bassW    = _bassGate(bassOver, 0.18);
+    const breathe  = bassOver * bassW;
+    const swayX    = Math.sin(t * 2.3) * fontSize * 0.012 + Math.sin(t * 19) * breathe * fontSize * 0.02;
+    const swayY    = Math.cos(t * 1.9) * fontSize * 0.009 + Math.cos(t * 15) * breathe * fontSize * 0.014;
 
     const wl = words.map((word, i) => {
-      const rowH  = rowHeights[i];
-      const centerY = stackCursor + rowH / 2;
-      stackCursor += rowH;
+      const localT = elapsed - i * stagger;
 
-      // Reveal: слово падает сверху
-      const dropDelay = (i / Math.max(n - 1, 1)) * Math.min(duration * 0.55, 1.0);
-      const dropT     = Math.max(0, elapsed - dropDelay);
-      const rawProg   = Math.min(dropT / 0.28, 1);
-      // Ease out quart — резкий влёт, мягкая посадка
-      const eased     = 1 - Math.pow(1 - rawProg, 4);
-
-      const startY = centerY - canvasH * 0.6;
-      const y      = startY + (centerY - startY) * eased;
-
-      // Небольшое X-смещение для «небрежности»
-      const xJitter  = (hash(i + 1, 11) - 0.5) * canvasW * 0.28;
-
-      // Rotation: газетная небрежность ±18°, замирает при посадке
-      const restRot  = (hash(i + 1, 17) - 0.5) * 0.32;
-      const dropRot  = (1 - eased) * (hash(i + 1, 23) - 0.5) * 0.8;
-      const rotation = restRot + dropRot + stackRot;
-
-      // Мини-отскок при посадке (scale)
-      let scale = scaleMult[i] * eased;
-      if (rawProg > 0.78 && rawProg < 1) {
-        const bounceP = (rawProg - 0.78) / 0.22;
-        scale *= 1 + Math.sin(bounceP * Math.PI) * 0.12;
-      }
-      if (rawProg >= 1) {
-        scale *= scaleMult[i] * (1 + bassOver * 0.08);
-        scale  = scale / scaleMult[i]; // нормализуем обратно
-        scale *= scaleMult[i];
+      // Ниже нуля слово ещё не появилось.
+      if (localT <= 0) {
+        return { word, x: 0, y: rowY[i], scale: 0, alpha: 0, rotation: 0 };
       }
 
-      const alpha = Math.min(rawProg * 2.5, 1);
+      // ── Появление: одна кривая на всё. Ease-out quint — быстрый влёт,
+      //    мягкая остановка. Никаких отскоков, которые потом приходится
+      //    отдельно гасить: перелёт уже заложен в самой кривой позиции.
+      const p     = Math.min(localT / DROP, 1);
+      const eased = 1 - Math.pow(1 - p, 5);
 
-      // Эффект «вдавливания» при посадке: краткий y-bounce
-      let landY = y;
-      if (rawProg > 0.82 && rawProg < 1) {
-        const lp = (rawProg - 0.82) / 0.18;
-        landY += Math.sin(lp * Math.PI) * fontSize * scaleMult[i] * 0.08;
-      }
+      // Падает сверху, из-за верхней кромки кадра.
+      const fromY = rowY[i] - canvasH * 0.55;
+      const y     = fromY + (rowY[i] - fromY) * eased;
+
+      // Кегль набирается по той же кривой — значит остановка кегля и
+      // остановка движения происходят одновременно, без второго рывка.
+      const scaleIn = scaleAt[i] * (0.82 + 0.18 * eased);
+
+      // Наклон: заметный в полёте, замирает на своём малом угле покоя.
+      const restRot = (hash(i + 1, 17) - 0.5) * 0.10;
+      const flyRot  = (1 - eased) * (hash(i + 1, 23) - 0.5) * 0.45;
+
+      // Горизонтальная небрежность — постоянная, задана текстом.
+      const xRest = (hash(i + 1, 11) - 0.5) * fontSize * 0.35 * fit;
+
+      // ── Вес «жизни»: 0 в момент остановки, 1 через SETTLE секунд.
+      //    Всё декоративное умножается на него, поэтому в кадре посадки
+      //    ни одна величина не меняется скачком.
+      const live = Math.min(Math.max(0, localT - DROP) / SETTLE, 1);
+
+      const scale = scaleIn * (1 + breathe * 0.05 * live);
+      const alpha = Math.min(p * 3, 1);
 
       return {
         word,
-        x:        xJitter + stackShakeX,
-        y:        landY   + stackShakeY,
-        scale:    scale,
+        x:        xRest + swayX * live,
+        y:        y     + swayY * live,
+        scale,
         alpha,
-        rotation,
+        rotation: restRot + flyRot + Math.sin(t * 0.9 + i) * 0.008 * live,
       };
     });
 
@@ -2300,9 +2550,8 @@ const AnimModes = {
 
     // Периодические bass-волны после сборки
     // Считаем «последний пик баса» детерминированно через floor(t)
-    const bassWavePulse = bassOver > 0.25
-      ? Math.max(0, 1 - ((t % 0.3) / 0.3)) * bassOver
-      : 0;
+    const bassWavePulse = Math.max(0, 1 - ((t % 0.3) / 0.3)) * bassOver
+                          * _bassGate(bassOver, 0.25);
 
     const wl = words.map((word, i) => {
       const ang = blastAngles[i];
@@ -2323,9 +2572,14 @@ const AnimModes = {
         // RETURN: возвращение на целевую позицию
         const retT = elapsed - RETURN_START;
         const rawP = Math.min(retT / RETURN_DUR, 1);
-        // Ease out elastic-like: overshoots
-        const eRet = rawP === 1 ? 1
-          : 1 - Math.pow(2, -10 * rawP) * Math.cos((rawP * 10 - 0.75) * (2 * Math.PI) / 3);
+        // Ease out elastic: пружинный доводчик с перелётом.
+        // Здесь стоял cos вместо sin, и знак был собран наоборот. При rawP = 0
+        // формула возвращала 1.0 вместо 0 — на первом же кадре возврата слово
+        // телепортировалось из точки разлёта (до 1600 px от центра) прямо на
+        // своё место, а следующие кадры отбрасывали его назад (0.69 → 0.39 →
+        // 0.57). Это и была та самая рваность.
+        const eRet = rawP === 0 ? 0 : rawP === 1 ? 1
+          : Math.pow(2, -10 * rawP) * Math.sin((rawP * 10 - 0.75) * (2 * Math.PI) / 3) + 1;
 
         // Текущая «орбита» возвращения
         const dist = blastDist * (0.7 + hash(i + 1, 3) * 0.6) * (1 - eRet);
@@ -2463,9 +2717,13 @@ const AnimModes = {
       const yStand  = -standH * (1 - easedFall); // убирается при падении
 
       // При ударе о землю — подскок следующей
+      // Вводится плавно и по басу, и по времени после падения — иначе
+      // костяшка получала толчок ровно в кадр приземления.
       let extraY = 0;
-      if (rawProg >= 1 && bassOver > 0.15) {
-        extraY = -Math.sin(t * 8 + i * 0.7) * bassOver * fontSize * 0.06;
+      if (rawProg >= 1) {
+        const settleW = Math.min(Math.max(0, fallT - FALL_DUR) / 0.25, 1);
+        extraY = -Math.sin(t * 8 + i * 0.7) * bassOver * fontSize * 0.06
+                 * _bassGate(bassOver, 0.15) * settleW;
       }
 
       // Impact flash: при завершении падения — кратковременный scale spike
@@ -2491,6 +2749,785 @@ const AnimModes = {
     });
 
     return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     HEADLINE — «Заголовок»
+     Настоящая типографика для текстовых припевов: слова переносятся по
+     строкам, как в обычном абзаце (по реальной измеренной ширине), а не
+     раскидываются по случайной сетке с поворотами. Строки идут одна под
+     другой по центру, каждая строка появляется своим шагом (не всё разом
+     и не вразнобой словами), а последняя строка — обычно хук, который
+     повторяется — читается крупнее остальных.
+
+     Почему это нужно отдельным режимом: в припеве текста МНОГО (несколько
+     строк, которые часто длиннее куплетных), и хаотичная раскладка по
+     сетке с рандомным углом на таком объёме превращается в нечитаемую
+     кашу — на постере с двумя-тремя словами это ещё «плакат», на восьми
+     словах это уже не типографика, а мусор. Здесь порядок и перенос
+     строк держатся ТЕКСТА, а не решётки ячеек, поэтому строка остаётся
+     строкой при любом количестве слов.
+
+     Никаких поворотов слов — только вход снизу с лёгким scale-in и
+     bass-пульс всего блока целиком (одно ритмичное «дыхание» на удар,
+     не на слово), чтобы припев продолжал бить, но текст оставался читаемым.
+  ═══════════════════════════════════════════════ */
+  headline({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+
+    const baseWidths = _measureWordsPx(ctx, words, fontSize, font);
+    const wordGap    = fontSize * 0.42;
+    const lineGapRaw = fontSize * 1.22;
+
+    /* ── Перенос строк по реальной ширине, как в абзаце ──
+       Ширину переноса задаёт ВЫЗЫВАЮЩИЙ, потому что строка живёт не во всём
+       кадре, а в своей колонке: когда сбоку стоит фигура, текст занимает
+       лишь свободную полосу (см. {LPOSX} в AutoDirector). Пока здесь стояло
+       глухое canvasW*0.82, длинная строка переносилась по всему кадру и
+       заезжала прямо на фигуру. Фолбэк на 0.82 остаётся для ручного
+       применения режима, когда полосу никто не считал. */
+    const maxLineW = (typeof maxLineWIn === 'number' && maxLineWIn > 40)
+      ? maxLineWIn : canvasW * 0.82;
+    const lineOf   = new Array(n);
+    const lines    = [];
+    let cur = [], curW = 0;
+    for (let i = 0; i < n; i++) {
+      const w    = baseWidths[i];
+      const addW = cur.length ? wordGap + w : w;
+      if (cur.length && curW + addW > maxLineW) {
+        lines.push(cur);
+        cur = [i]; curW = w;
+      } else {
+        cur.push(i); curW += addW;
+      }
+    }
+    if (cur.length) lines.push(cur);
+    const numLines = lines.length;
+    lines.forEach((idxs, li) => idxs.forEach(i => { lineOf[i] = li; }));
+
+    // Позиция каждого слова внутри своей строки (центрировано)
+    const xInLine = new Array(n);
+    const lineW   = new Array(numLines);
+    lines.forEach((idxs, li) => {
+      let w = 0;
+      idxs.forEach((idx, k) => { w += baseWidths[idx] + (k ? wordGap : 0); });
+      lineW[li] = w;
+      let cursor = -w / 2;
+      idxs.forEach((idx) => {
+        xInLine[idx] = cursor + baseWidths[idx] / 2;
+        cursor += baseWidths[idx] + wordGap;
+      });
+    });
+
+    // Вертикальный шаг строк сжимается, если строк много — блок держится
+    // в безопасной высоте кадра, а не уезжает за границы.
+    const maxTotalH = canvasH * 0.62;
+    const lineGap   = numLines > 1 ? Math.min(lineGapRaw, maxTotalH / (numLines - 1)) : lineGapRaw;
+    const totalH    = lineGap * (numLines - 1);
+    const lineY     = new Array(numLines);
+    for (let li = 0; li < numLines; li++) lineY[li] = -totalH / 2 + li * lineGap;
+
+    // Индекс слова внутри своей строки — нужен для внутристрочного stagger
+    const posInLine = new Array(n);
+    lines.forEach((idxs) => idxs.forEach((idx, k) => { posInLine[idx] = k; }));
+
+    // ── Тайминг: строки идут одна за другой, слова внутри строки — почти разом ──
+    const lineStagger = Math.min(0.22, Math.max(0.10, (duration * 0.5) / Math.max(numLines, 1)));
+    const wordStaggerInLine = 0.045;
+    const growDur = 0.30;
+
+    // ── Bass-пульс всего блока: один общий удар, а не по словам ──
+    const bassOver   = Math.max(0, bands.bass - 0.30) * params.bassSens;
+    const beatPulse  = 1 + bassOver * 0.10;
+
+    const wl = words.map((word, i) => {
+      const li       = lineOf[i];
+      const k        = posInLine[i];
+      const isHook   = numLines > 1 && li === numLines - 1;
+      const lineBoost = isHook ? 1.12 : 1.0;
+
+      const wordStart = li * lineStagger + k * wordStaggerInLine;
+      const localT    = Math.max(0, elapsed - wordStart);
+      const p         = Math.min(localT / growDur, 1);
+      const eased     = 1 - Math.pow(1 - p, 3);
+
+      const riseY   = (1 - eased) * fontSize * 0.32;
+      const scaleIn = (0.72 + eased * 0.28) * lineBoost * beatPulse;
+      const alpha   = Math.min(p * 1.6, 1);
+
+      return {
+        word,
+        x:        xInLine[i],
+        y:        lineY[li] + riseY,
+        scale:    scaleIn,
+        alpha,
+        rotation: 0,
+      };
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     TRACKING — «Разрядка»
+     Типографический приём, а не траектория: строка ВСЁ ВРЕМЯ стоит на своём
+     месте, но начинается с огромной разрядки (межсловные пробелы втрое шире
+     нормы) и собирается к финальному кеглю набора. Слова не летят по кадру и
+     не крутятся — движется сам НАБОР, как будто его выключают по формату.
+
+     Почему в куплете: куплет надо читать, а «выезд строки откуда-то» —
+     это то, от чего он делается скучным (все выезды похожи). Здесь глаз
+     с первого кадра видит все слова на своих местах и читает, пока набор
+     ещё уплотняется, — движение и читаемость не конкурируют.
+
+     Раскрытие идёт ОТ ЦЕНТРА строки наружу: крайние слова приходят
+     последними, и строка «схлопывается», а не проявляется слева направо
+     (это уже занято набором и караоке).
+  ═══════════════════════════════════════════════ */
+  tracking({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+
+    const widths  = _measureWordsPx(ctx, words, fontSize, font);
+    const wordGap = fontSize * 0.44;
+    const band    = _measureBand(maxLineWIn, canvasW);
+    const { lines, lineOf, posInLine, lineW, numLines } = _wrapWords(widths, wordGap, band);
+
+    const lineGap = _lineStep(numLines, fontSize, canvasH, 1.26);
+    const totalH  = lineGap * (numLines - 1);
+
+    // Финальные X внутри строки (центрированная выключка)
+    const xFinal = new Array(n);
+    lines.forEach((idxs, li) => {
+      let cursor = -lineW[li] / 2;
+      idxs.forEach((idx) => {
+        xFinal[idx] = cursor + widths[idx] / 2;
+        cursor += widths[idx] + wordGap;
+      });
+    });
+
+    /* Разрядка: раскрытие 3× по горизонтали от центра строки. Ужимается,
+       если строка и так широкая, — иначе стартовый кадр уезжает за поле. */
+    const SPREAD = 2.0;
+    const COLLAPSE = 0.52;                       // сколько собирается набор
+    const bassOver = Math.max(0, bands.bass - 0.30) * params.bassSens;
+    const breathe  = 1 + bassOver * 0.045 * _bassGate(bassOver, 0.12);
+
+    const wl = words.map((word, i) => {
+      const li  = lineOf[i];
+      const cnt = lines[li].length;
+      // Расстояние от центра строки в словах — задаёт и разлёт, и очередь
+      const fromCenter = Math.abs(posInLine[i] - (cnt - 1) / 2);
+      const wordStart  = li * 0.16 + (cnt - 1 - fromCenter) * 0.035;
+      const p     = Math.min(Math.max(0, elapsed - wordStart) / COLLAPSE, 1);
+      const eased = 1 - Math.pow(1 - p, 4);      // резкое замедление в конце
+
+      /* Разлёт клампится по краю полосы: крайнее слово приходит последним,
+         то есть проявляется ещё в разряженном наборе, и без ограничения
+         зажигалось бы уже за кадром. */
+      const lim = Math.abs(xFinal[i]) > 1
+        ? Math.max(1, (band * 0.5 - widths[i] * 0.5) / Math.abs(xFinal[i]))
+        : SPREAD;
+      const spread    = Math.min(SPREAD, lim);
+      const spreadNow = spread - (spread - 1) * eased;
+      const x = xFinal[i] * spreadNow;
+      // Пока набор разрежен — слова чуть уже (как узкое начертание),
+      // к финалу приходят в нормальную ширину.
+      const scale = (0.88 + eased * 0.12) * breathe;
+
+      return {
+        word,
+        x,
+        y: -totalH / 2 + li * lineGap,
+        scale,
+        alpha: Math.min(p * 2.2, 1),
+        rotation: 0,
+      };
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     RAGGED — «Рваный набор»
+     Флаговый набор влево с висячим отступом: строки не выровнены по центру,
+     а стоят лесенкой с чередующимся отступом — так верстают выноски и
+     титры, и именно это отличает вёрстку от субтитра.
+
+     Слова приходят СЛЕВА, каждое из-под предыдущего, с небольшим
+     перелётом — набор «набивается» словом за словом, как строка на
+     линотипе. Замыкающая строка блока крупнее и с обратным отступом:
+     у куплета появляется низ, к которому он идёт.
+  ═══════════════════════════════════════════════ */
+  ragged({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+
+    const widths  = _measureWordsPx(ctx, words, fontSize, font);
+    const wordGap = fontSize * 0.40;
+    const band    = _measureBand(maxLineWIn, canvasW);
+    // Отступ съедает полосу — переносим по уже уменьшенной ширине,
+    // иначе строка с отступом вылезает за колонку.
+    const indent  = fontSize * 0.55;
+    const { lines, lineOf, posInLine, lineW, numLines } =
+      _wrapAtLeast(widths, wordGap, band - indent);
+
+    const lineGap = _lineStep(numLines, fontSize, canvasH, 1.30);
+    const totalH  = lineGap * (numLines - 1);
+
+    // Отступ строки: лесенка 0 / +indent, у последней — обратный вылет.
+    const indentOf = new Array(numLines);
+    for (let li = 0; li < numLines; li++) {
+      indentOf[li] = (li % 2) ? indent : 0;
+      if (numLines > 1 && li === numLines - 1) indentOf[li] = -indent * 0.45;
+    }
+
+    // Блок стоит флагом влево: левый край общий для всех строк.
+    const widest = Math.max.apply(null, lineW);
+    const left   = -widest / 2;
+
+    const xFinal = new Array(n);
+    lines.forEach((idxs, li) => {
+      let cursor = left + indentOf[li];
+      idxs.forEach((idx) => {
+        xFinal[idx] = cursor + widths[idx] / 2;
+        cursor += widths[idx] + wordGap;
+      });
+    });
+
+    const bassOver = Math.max(0, bands.bass - 0.30) * params.bassSens;
+    const SLIDE    = 0.34;
+    const STAGGER  = 0.055;
+
+    const wl = words.map((word, i) => {
+      const li     = lineOf[i];
+      const isHook = numLines > 1 && li === numLines - 1;
+      const start  = li * 0.13 + posInLine[i] * STAGGER;
+      const p      = Math.min(Math.max(0, elapsed - start) / SLIDE, 1);
+      // Перелёт: слово проскакивает свою позицию на ~6% ширины и садится.
+      const eased  = 1 - Math.pow(1 - p, 3);
+      const over   = Math.sin(p * Math.PI) * (1 - p) * 0.35;
+
+      const dx = -(1 - eased) * fontSize * 1.15 + over * fontSize * 0.18;
+      const scale = (isHook ? 1.10 : 1.0)
+                  * (0.96 + eased * 0.04)
+                  * (1 + bassOver * 0.05 * _bassGate(bassOver, 0.12));
+
+      return {
+        word,
+        x: xFinal[i] + dx,
+        y: -totalH / 2 + li * lineGap,
+        scale,
+        alpha: Math.min(p * 2.0, 1),
+        rotation: 0,
+      };
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     JUSTIFY — «Выключка по формату»
+     Строки выключены по ОБОИМ краям: межсловные пробелы растягиваются так,
+     что каждая строка занимает ровно ширину полосы. Получается плотный
+     прямоугольный блок — вид, которого нет ни у одного другого режима
+     (все остальные центрируют строку и оставляют рваный правый край).
+
+     Появление — строчное, а не пословное: строка приходит целиком со
+     СВОЕЙ стороны (нечётные слева, чётные справа) и тормозит у формата.
+     Это склейка уровня абзаца: куплет читается блоками мысли, а не
+     чередой отдельных слов.
+
+     Одиночная строка не выключается (растянутая в одиночку строка — это
+     дыры между словами, классический брак набора) — она просто
+     центрируется.
+  ═══════════════════════════════════════════════ */
+  justify({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+
+    const widths  = _measureWordsPx(ctx, words, fontSize, font);
+    const wordGap = fontSize * 0.40;
+    const band    = _measureBand(maxLineWIn, canvasW);
+    /* Выключка бывает только у абзаца: на одном ряду растягивать нечего.
+       Формат берём НЕ во всю полосу, а по факту переноса — иначе на узком
+       переносе строки выключались бы в ширину кадра и блок разъезжался
+       дырами. */
+    const wrapRes = _wrapAtLeast(widths, wordGap, band);
+    const { lines, lineOf, posInLine, lineW, numLines } = wrapRes;
+    const measure = wrapRes.measure || band;
+
+    const lineGap = _lineStep(numLines, fontSize, canvasH, 1.24);
+    const totalH  = lineGap * (numLines - 1);
+
+    const xFinal = new Array(n);
+    lines.forEach((idxs, li) => {
+      const gaps = idxs.length - 1;
+      /* Последняя строка абзаца по правилам набора НЕ выключается —
+         иначе два слова растягиваются на всю полосу. Она стоит по левому
+         краю формата, как концевая. Одиночную строку центрируем. */
+      const isLast = li === numLines - 1;
+      let gap = wordGap, startX = -lineW[li] / 2;
+      if (gaps > 0 && numLines > 1 && !isLast) {
+        // Растяжка ограничена: пробел шире 1.6 кегля — это уже дыра.
+        gap    = Math.min(wordGap + (measure - lineW[li]) / gaps, fontSize * 1.6);
+        const w = lineW[li] + (gap - wordGap) * gaps;
+        startX  = -w / 2;
+      } else if (numLines > 1 && isLast) {
+        startX = -measure / 2;
+      }
+      let cursor = startX;
+      idxs.forEach((idx) => {
+        xFinal[idx] = cursor + widths[idx] / 2;
+        cursor += widths[idx] + gap;
+      });
+    });
+
+    const bassOver = Math.max(0, bands.bass - 0.30) * params.bassSens;
+    const ARRIVE   = 0.38;
+    const LSTAGGER = Math.min(0.20, Math.max(0.09, (duration * 0.45) / Math.max(numLines, 1)));
+
+    const wl = words.map((word, i) => {
+      const li   = lineOf[i];
+      const side = (li % 2) ? 1 : -1;
+      const p    = Math.min(Math.max(0, elapsed - li * LSTAGGER) / ARRIVE, 1);
+      const eased = 1 - Math.pow(1 - p, 4);
+
+      // Строка едет целиком — внутри строки сдвиг общий, набор не рвётся.
+      const dx = side * (1 - eased) * measure * 0.16;
+      // Лёгкая вертикальная «усадка» блока к формату
+      const dy = (1 - eased) * fontSize * 0.10 * side;
+      const scale = (0.97 + eased * 0.03)
+                  * (1 + bassOver * 0.05 * _bassGate(bassOver, 0.12));
+
+      return {
+        word,
+        x: xFinal[i] + dx,
+        y: -totalH / 2 + li * lineGap + dy,
+        scale,
+        alpha: Math.min(p * 2.4, 1),
+        rotation: 0,
+      };
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     POSTER — «Плакат»
+     Строка перестаёт быть строкой: ПЕРВОЕ слово набирается монументально во
+     всю полосу, а остальные идут мелким кеглем ПОД ним. Разница кеглей — в
+     пять раз, и она и есть композиция: глаз ловит крупное слово, потом
+     дочитывает мелкое.
+
+     Три правила, каждое оплачено сломанным кадром:
+
+     1. ГЕРОЙ — ПЕРВОЕ СЛОВО, а не самое длинное. Сначала крупным ставилось
+        самое длинное — и строка «Comic books sell lies» читалась как
+        «books ... Comic sell lies»: порядок слов в кадре переставал
+        совпадать с порядком в песне, и это сбивало с толку. Крупное слово
+        обязано быть тем, с которого строка начинается.
+
+     2. МЕЛКИЙ БЛОК — ВСЕГДА ПОД ГЕРОЕМ (или строго справа от него), и его
+        место вычитается из места героя, а не накладывается на него. Пока
+        блок ставился «сбоку» с независимым клампом, он ложился прямо на
+        крупные буквы — текст наезжал сам на себя.
+
+     3. НИКАКОГО ОБРЕЗА. Герой держится внутри полосы всегда. Обрез был моей
+        выдумкой: на афише в обрез уходит ОДИН край длинного слова, а здесь
+        слово из пяти букв растягивалось шире кадра и срезалось с ОБЕИХ
+        сторон — первая и последняя буквы наполовину, читать нечего. Вместе
+        с героем за край уезжал и мелкий блок, привязанный к его краю.
+        Монументальность даёт разница кеглей, а не выход за кадр.
+  ═══════════════════════════════════════════════ */
+  poster(o) {
+    const { bands, t, params, words, canvasW, canvasH,
+            elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn } = o;
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+    const widths = _measureWordsPx(ctx, words, fontSize, font);
+    const band   = _measureBand(maxLineWIn, canvasW);
+
+    const hi   = 0;                       // герой — первое слово строки
+    const rest = [];
+    for (let i = 1; i < n; i++) rest.push(i);
+
+    const SMALL = 0.46;
+    const sw    = rest.map(i => widths[i] * SMALL);
+    const sGap  = fontSize * SMALL * 0.55;
+
+    /* Герой живёт внутри полосы. Полоса и так уже кадра, когда сбоку стоит
+       фигура, — выход за неё означал бы выход на фигуру. */
+    const FILL = 0.98;
+
+    /* Три раскладки. Все три сохраняют порядок чтения: герой первый,
+       мелочь после него.
+         0 — мелкий блок под героем, по левому краю;
+         1 — мелкий блок под героем, по правому краю;
+         2 — мелкий столбик справа от героя (по одному слову в ряд).
+       Столбик возможен, только если он реально влезает рядом: ему нужно
+       место, и это место ОТНИМАЕТСЯ у героя. */
+    let V = _variantOf(words, 3);
+    const colWordW = sw.length ? Math.max.apply(null, sw) : 0;
+    const colW     = colWordW + fontSize * SMALL * 0.8;
+    if (V === 2 && (rest.length < 2 || colW > band * 0.34)) V = 0;
+    const sideCol  = (V === 2);
+    const axis     = (V === 1) ? 1 : -1;      // к какому краю героя прижат блок
+
+    /* ── Место героя берётся ПО СИЛУЭТУ фигуры, а не по её габариту ──
+       Свободная ширина зависит от ВЫСОТЫ: над головой её больше, на уровне
+       корпуса меньше. Но высота героя сама зависит от его кегля, а кегль —
+       от ширины. Замкнутый круг разрывается двумя проходами: первый считает
+       кегль по полосе, второй — уже по контуру на той высоте, где герой
+       реально встанет. Второго прохода достаточно: поправка контура
+       меняет кегль на десятки процентов, а не в разы.
+
+       Ширину для ряда берём САМУЮ УЗКУЮ из нескольких высот по всей
+       высоте слова: иначе буква, чей верх поместился в просвет над плечом,
+       низом упирается в корпус. */
+    const byHeight = (canvasH * 0.34) / (fontSize * 0.75);
+
+    function heroFitAt(yCenter, halfH) {
+      let a = -Infinity, b = Infinity;
+      for (let k = -1; k <= 1; k++) {
+        const sp = _freeSpanAt(o, yCenter + k * halfH);
+        if (sp.a > a) a = sp.a;
+        if (sp.b < b) b = sp.b;
+      }
+      /* Поля кадра обязаны остаться: слово во всю свободную ширину, когда
+         фигуры нет, — это «текст заполняет весь экран», а не плакат. */
+      const room = Math.min((b - a) * FILL, canvasW * 0.80) - (sideCol ? colW : 0);
+      return { room: Math.max(canvasW * 0.10, room), mid: (a + b) / 2 };
+    }
+
+    // Проход 1 — грубо, по полосе: нужен только чтобы узнать высоту слова.
+    const rough = Math.max(1.05, Math.min(
+      (Math.min(band * FILL, canvasW * 0.80) - (sideCol ? colW : 0)) / Math.max(widths[hi], 1),
+      byHeight));
+    // Проход 2 — по контуру на реальной высоте героя.
+    const fit2 = heroFitAt(0, fontSize * rough * 0.38);
+    const heroRoom  = fit2.room;
+    const heroMid   = fit2.mid;
+
+    const byWidth  = heroRoom / Math.max(widths[hi], 1);
+    const heroScale = Math.max(1.05, Math.min(byWidth, byHeight));
+
+    // Мелкий блок под героем переносится по ширине героя, а не полосы:
+    // так он читается как подпись к слову, а не как отдельная строка.
+    const sWrap  = sideCol ? null
+                 : _wrapWords(sw, sGap, Math.max(widths[hi] * heroScale, fontSize));
+    const sLineH = fontSize * SMALL * 1.35;
+    const restH  = sideCol ? 0 : sWrap.numLines * sLineH;
+
+    // Высота блока целиком держится в кадре — ужимаем героя, не текст.
+    const heroH0 = fontSize * heroScale;
+    const fitK   = Math.min(1, (canvasH * 0.74) / Math.max(heroH0 * 0.86 + restH, 1));
+    const heroS  = heroScale * fitK;
+    const heroHf = fontSize * heroS;
+    const heroW  = widths[hi] * heroS;
+
+    const blockH = heroHf * 0.86 + restH * fitK;
+    const topY   = -blockH / 2;
+    const heroY  = topY + heroHf * 0.44;
+
+    /* Герой стоит по центру СВОБОДНОГО ПРОСВЕТА (heroMid), а не по центру
+       кадра: просвет смещён в сторону от фигуры, и центрировать в нём —
+       это и есть «выстроиться по маске». Со столбиком герой дополнительно
+       сдвигается, чтобы столбик встал в освободившееся место, а не на
+       буквы. */
+    const heroX  = heroMid - (sideCol ? colW / 2 : 0);
+
+    const xSmall = new Array(n), ySmall = new Array(n);
+    if (sideCol) {
+      const step  = fontSize * SMALL * 1.5;
+      const top   = -step * (rest.length - 1) / 2;
+      const colL0 = heroX + heroW / 2 + fontSize * SMALL * 0.8;
+      rest.forEach((wi, k) => {
+        const rowY = top + k * step;
+        // Каждое слово столбика — по просвету СВОЕЙ высоты.
+        const free = _freeSpanAt(o, rowY);
+        const colL = Math.max(free.a, Math.min(free.b - sw[k], colL0));
+        xSmall[wi] = colL + sw[k] / 2;
+        ySmall[wi] = rowY;
+      });
+    } else {
+      const smallTop = topY + heroHf * 0.86;
+      const heroEdge = heroX + axis * (heroW / 2);
+      sWrap.lines.forEach((idxs, li) => {
+        let w = 0;
+        idxs.forEach((k, j) => { w += sw[k] + (j ? sGap : 0); });
+        const rowY = smallTop + (li + 0.5) * sLineH * fitK;
+        /* Ряд мелочи выравнивается по оси героя, но своим просветом: он
+           стоит НИЖЕ героя, а там фигура шире (плечи, корпус) — контур на
+           его высоте другой. Без этого подпись, выровненная по краю
+           крупного слова, залезала фигуре на грудь. */
+        const free = _freeSpanAt(o, rowY);
+        let start = (axis < 0) ? heroEdge : heroEdge - w;
+        start = Math.max(free.a, Math.min(free.b - w, start));
+        let cursor = start;
+        idxs.forEach((k) => {
+          const wi = rest[k];
+          xSmall[wi] = cursor + sw[k] / 2;
+          ySmall[wi] = rowY;
+          cursor += sw[k] + sGap;
+        });
+      });
+    }
+
+    const bassOver = Math.max(0, bands.bass - 0.28) * params.bassSens;
+    const heroBeat = 1 + bassOver * 0.06 * _bassGate(bassOver, 0.12);
+
+    const wl = words.map((word, i) => {
+      if (i === hi) {
+        const p = Math.min(elapsed / 0.42, 1);
+        const e = 1 - Math.pow(1 - p, 4);
+        return {
+          word,
+          x: heroX,
+          y: heroY,
+          scale: heroS * (0.90 + e * 0.10) * heroBeat,
+          alpha: Math.min(p * 2.2, 1),
+          rotation: 0,
+        };
+      }
+      const k = rest.indexOf(i);
+      const p = Math.min(Math.max(0, elapsed - 0.14 - k * 0.05) / 0.30, 1);
+      const e = 1 - Math.pow(1 - p, 3);
+      // Мелочь подтягивается к своей оси — движение идёт К герою.
+      const slide = (1 - e) * fontSize * 0.5;
+      return {
+        word,
+        x: xSmall[i] + (sideCol ? slide : axis * slide),
+        y: ySmall[i],
+        scale: SMALL * fitK,
+        alpha: Math.min(p * 2.2, 1),
+        rotation: 0,
+      };
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     BACKDROP — «Подложка»
+     Фраза набирается ДВАЖДЫ: огромным кеглем во весь кадр, в обрез с обеих
+     сторон и с медленным наездом — и обычным читаемым кеглем поверх. Первый
+     набор работает не текстом, а декорацией кадра: глаз читает передний, а
+     фоном держится тот же смысл, только в масштабе плаката.
+
+     Это замена вертикальной выноске. Повёрнутое слово даёт вторую ось, но
+     ЧИТАТЬ его в клипе нельзя: строка живёт три секунды, а вертикаль
+     требует, чтобы зритель повернул голову. Полноэкранный дубль решает ту
+     же задачу — сломать «одна строка по центру» — и при этом остаётся
+     читаемым в обе стороны.
+
+     Подложка идёт в массиве ПЕРВОЙ и помечена ghost:true, поэтому рисуется
+     ПОД набором и не забирает себе разметку слов (см. spanIdx в
+     renderers.js).
+  ═══════════════════════════════════════════════ */
+  backdrop(o) {
+    const { bands, t, params, words, canvasW, canvasH,
+            elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn } = o;
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+    const widths = _measureWordsPx(ctx, words, fontSize, font);
+    const band   = _measureBand(maxLineWIn, canvasW);
+
+    /* ── Подложка ──
+       Число рядов подбирается по количеству слов: фраза должна лечь в
+       кадр примерно квадратом, иначе на длинной строке подложка выходит
+       узкой лентой, а на короткой — одной строкой в полкадра. */
+    const rowsTarget = Math.max(1, Math.min(4, Math.round(Math.sqrt(n * 0.9))));
+    const totalW = widths.reduce((a, b) => a + b, 0) + fontSize * 0.4 * (n - 1);
+    const gWrap  = _wrapWords(widths, fontSize * 0.4, Math.max(totalW / rowsTarget, Math.max.apply(null, widths)));
+    const gMaxW  = Math.max.apply(null, gWrap.lineW);
+
+    /* Кегль подложки: самый широкий ряд встаёт РОВНО в кадр. Было 1.12 —
+       подложка стартовала уже обрезанной, а наезд добавлял сверху ещё 7%,
+       итого пятая часть фразы жилась за краем. За кадр она теперь выходит
+       только по ходу наезда, и это читается как движение камеры, а не как
+       вылезший текст. */
+    const BLEED  = 1.0;
+    let gScale   = (canvasW * BLEED) / Math.max(gMaxW, 1);
+    const gRowH0 = fontSize * 1.02;
+    if (gRowH0 * gScale * gWrap.numLines > canvasH * 1.05) {
+      gScale = (canvasH * 1.05) / (gRowH0 * gWrap.numLines);
+    }
+    const gRowH = gRowH0 * gScale;
+    const gTop  = -gRowH * (gWrap.numLines - 1) / 2;
+
+    // Медленный наезд на всю длительность строки — кино, а не анимация:
+    // движение не должно заканчиваться раньше, чем строка сменится.
+    const life  = duration > 0.4 ? Math.min(elapsed / duration, 1) : 1;
+    const push  = 1 + life * 0.07;
+    const gFade = Math.min(elapsed / 0.55, 1);
+    const bassOver = Math.max(0, bands.bass - 0.28) * params.bassSens;
+
+    const wl = [];
+    gWrap.lines.forEach((idxs, li) => {
+      let w = 0;
+      idxs.forEach((k, j) => { w += widths[k] + (j ? fontSize * 0.4 : 0); });
+      let cursor = -w / 2;
+      idxs.forEach((k) => {
+        wl.push({
+          ghost: true,
+          word:  words[k],
+          x:     (cursor + widths[k] / 2) * gScale * push,
+          y:     (gTop + li * gRowH) * push,
+          scale: gScale * push,
+          alpha: gFade * (0.13 + bassOver * 0.09 * _bassGate(bassOver, 0.12)),
+          rotation: 0,
+        });
+        cursor += widths[k] + fontSize * 0.4;
+      });
+    });
+
+    /* ── Передний набор ──
+       Он и есть то, что читают, поэтому стоит по центру обычным кеглем.
+       Смещение от центра кадра — по варианту: подложка симметрична, и если
+       текст всегда стоит ровно посередине, кадр получается зеркальным и
+       мёртвым. */
+    const V     = _variantOf(words, 3);
+    const shift = (V === 0) ? 0 : (V === 1 ? -1 : 1) * canvasH * 0.17;
+
+    const wordGap = fontSize * 0.42;
+    const fWrap   = _wrapWords(widths, wordGap, band);
+    const lineGap = _lineStep(fWrap.numLines, fontSize, canvasH, 1.24);
+    const totalH  = lineGap * (fWrap.numLines - 1);
+
+    const xF = new Array(n), yF = new Array(n);
+    fWrap.lines.forEach((idxs, li) => {
+      const rowY = -totalH / 2 + li * lineGap + shift;
+      /* Читаемый набор встаёт в просвет силуэта на СВОЕЙ высоте: подложка
+         идёт через весь кадр и фигуре не мешает, а вот передний текст
+         обязан быть виден — прятать его за фигуру незачем. */
+      const free = _freeSpanAt(o, rowY);
+      const w    = fWrap.lineW[li];
+      let mid = (free.a + free.b) / 2;
+      if (w > free.b - free.a) mid = 0;      // не влезает — центрируем как есть
+      let cursor = mid - w / 2;
+      idxs.forEach((idx) => {
+        xF[idx] = cursor + widths[idx] / 2;
+        yF[idx] = rowY;
+        cursor += widths[idx] + wordGap;
+      });
+    });
+
+    words.forEach((word, i) => {
+      const p = Math.min(Math.max(0, elapsed - fWrap.lineOf[i] * 0.12 - fWrap.posInLine[i] * 0.04) / 0.28, 1);
+      const e = 1 - Math.pow(1 - p, 4);
+      wl.push({
+        word,
+        x: xF[i],
+        y: yF[i] + (1 - e) * fontSize * 0.20,
+        scale: 0.95 + e * 0.05,
+        alpha: Math.min(p * 2.4, 1),
+        rotation: 0,
+      });
+    });
+
+    return { wordLayout: true, words: wl };
+  },
+
+  /* ═══════════════════════════════════════════════
+     ECHO — «Эхо»
+     Ключевое слово размножается мелкой сеткой по всему полю и работает
+     ФАКТУРОЙ, а сама строка идёт поверх неё контрастным кеглем. Кадр
+     перестаёт быть «фон + подпись»: у него появляется свой слой набора.
+
+     Повторы помечены ghost:true и стоят в массиве ПЕРЕД набором, поэтому
+     рисуются ПОД ним и не забирают себе разметку слов (см. spanIdx в
+     renderers.js). Ячейки, попадающие прямо на текст, всё равно
+     выбрасываются: поле обтекает набор, и строка читается на чистом месте,
+     как в референсе.
+  ═══════════════════════════════════════════════ */
+  echo({ bands, t, params, springs, words, canvasW, canvasH, elapsed, duration, fontSize, ctx, font, maxLineW: maxLineWIn }) {
+    if (!words || !words.length) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, alpha: 1 };
+    const n = words.length;
+    const widths = _measureWordsPx(ctx, words, fontSize, font);
+    const band   = _measureBand(maxLineWIn, canvasW);
+
+    const wordGap = fontSize * 0.42;
+    const { lines, lineOf, posInLine, lineW, numLines } = _wrapWords(widths, wordGap, band);
+    const lineGap = _lineStep(numLines, fontSize, canvasH, 1.24);
+    const totalH  = lineGap * (numLines - 1);
+
+    const xFinal = new Array(n), yFinal = new Array(n);
+    lines.forEach((idxs, li) => {
+      let cursor = -lineW[li] / 2;
+      idxs.forEach((idx) => {
+        xFinal[idx] = cursor + widths[idx] / 2;
+        yFinal[idx] = -totalH / 2 + li * lineGap;
+        cursor += widths[idx] + wordGap;
+      });
+    });
+
+    const bassOver = Math.max(0, bands.bass - 0.28) * params.bassSens;
+
+    const wl = words.map((word, i) => {
+      const p = Math.min(Math.max(0, elapsed - posInLine[i] * 0.04 - lineOf[i] * 0.12) / 0.26, 1);
+      const e = 1 - Math.pow(1 - p, 4);
+      return {
+        word,
+        x: xFinal[i],
+        y: yFinal[i] + (1 - e) * fontSize * 0.22,
+        scale: 0.94 + e * 0.06,
+        alpha: Math.min(p * 2.4, 1),
+        rotation: 0,
+      };
+    });
+
+    // ── Поле повторов ──
+    let hi = 0;
+    for (let i = 1; i < n; i++) if (widths[i] >= widths[hi]) hi = i;
+    /* Три фактуры поля:
+         0 — ровная сетка со сдвигом рядов (типографский набор впритык);
+         1 — редкая сетка с наклоном: повторы стоят под углом, поле читается
+             как штриховка, а не как таблица;
+         2 — крупный редкий повтор: ячеек мало, кегль вдвое больше, поле
+             читается как эхо, а не как фон.
+       Вариант — по тексту строки, чтобы соседние строки секции не давали
+       одно и то же поле. */
+    const FV   = _variantOf(words, 3);
+    const ECHO = (FV === 1) ? 0.36 : (FV === 2) ? 0.85 : 0.42;
+    const eW   = widths[hi] * ECHO;
+    const eH   = fontSize * ECHO;
+    const stepX = eW + fontSize * ECHO * (FV === 1 ? 1.5 : FV === 2 ? 0.5 : 0.7);
+    const stepY = eH * (FV === 1 ? 2.6 : FV === 2 ? 1.6 : 1.9);
+    const cols  = Math.min(6, Math.max(2, Math.floor(band / stepX)));
+    const rows  = Math.min(9, Math.max(2, Math.floor((canvasH * 0.85) / stepY)));
+    const tilt  = (FV === 1) ? -0.18 : 0;
+
+    // Чистая зона под набором — по фактическому габариту блока.
+    const clearW = Math.max.apply(null, lineW) / 2 + fontSize * 0.5;
+    const clearH = totalH / 2 + fontSize * 0.8;
+
+    // Поле дышит целиком: медленный снос вбок плюс общий подъём на басу.
+    const fieldFade = Math.min(Math.max(0, elapsed - 0.05) / 0.5, 1);
+    const drift = Math.sin(t * 0.35) * fontSize * 0.20;
+    /* Одно слово в строке — размножать нечего: поле из того же слова, что
+       и сам набор, читается как сбой рендера, а не как фактура. */
+    const CAP = (n < 2) ? 0 : 44;
+    const field = [];
+    for (let r = 0; r < rows && field.length < CAP; r++) {
+      for (let c = 0; c < cols && field.length < CAP; c++) {
+        const x = (c - (cols - 1) / 2) * stepX + ((r % 2) ? stepX * 0.35 : 0) + drift;
+        const y = (r - (rows - 1) / 2) * stepY;
+        if (Math.abs(x) < clearW + eW / 2 && Math.abs(y) < clearH + eH / 2) continue;
+        field.push({
+          ghost: true,
+          word: words[hi],
+          x, y,
+          scale: ECHO,
+          alpha: fieldFade * (0.24 + bassOver * 0.12 * _bassGate(bassOver, 0.12)),
+          rotation: tilt,
+        });
+      }
+    }
+
+    // Поле — первым: рисуется ПОД набором, разметку слов не сдвигает.
+    return { wordLayout: true, words: field.concat(wl) };
   },
 
   /* ═══════════════════════════════════════════════

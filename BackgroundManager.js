@@ -659,6 +659,18 @@ const BackgroundManager = (() => {
       pulseScale = 1 + e._bassSmooth * 0.18 * (e.pulseAmount || 0.3);
     }
 
+    // ── Text-driven camera (montage/drift) ────────────────────────────────
+    // Decay тикается ПОСЛЕ draw в App.js/ExportEngine, поэтому здесь _decay=1
+    // (как в legacy drawMedia). Применяем мультипликативно — это точная
+    // legacy-формула: zoom *= effectiveZoomMul.
+    let _txc = { zoomMul: 1, panX: 0, panY: 0, active: false };
+    if (typeof BackgroundEngine !== 'undefined' && BackgroundEngine.getEffectiveTextCamera) {
+      _txc = BackgroundEngine.getEffectiveTextCamera();
+      if (_txc.active && e.fitMode !== 'stretch') {
+        zoom *= _txc.zoomMul;
+      }
+    }
+
     // Гарантия покрытия
     if (e.fitMode !== 'stretch') zoom = Math.max(1.0, zoom);
 
@@ -739,9 +751,15 @@ const BackgroundManager = (() => {
     drawCtx.save();
     drawCtx.globalAlpha = e.opacity * (needsBlur ? 1 : alpha);
 
-    // Базовые координаты для центрирования
-    const baseDx = (cw - drawW) / 2 + offX + shakeX - kbX;
-    const baseDy = (ch - drawH) / 2 + offY + shakeY - kbY;
+    // Базовые координаты для центрирования.
+    // Text-driven pan: знак согласован с BackgroundEngine.drawMedia(), где
+    // фактически `dx = baseDx - kbPanX + textPanX` (см. строки kbPanX -= textPanX
+    // и dx = baseDx - kbPanX). То есть положительный _txc.panX сдвигает фон
+    // ВПРАВО — даёт parallax-эффект с camX-движением слов.
+    const _tpx = (_txc.active && e.fitMode !== 'stretch') ? _txc.panX : 0;
+    const _tpy = (_txc.active && e.fitMode !== 'stretch') ? _txc.panY : 0;
+    const baseDx = (cw - drawW) / 2 + offX + shakeX - kbX + _tpx;
+    const baseDy = (ch - drawH) / 2 + offY + shakeY - kbY + _tpy;
 
     // Поворот вокруг центра холста
     if (e.rotation) {

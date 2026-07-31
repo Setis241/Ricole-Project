@@ -30,7 +30,7 @@
 ═══════════════════════════════════════════════ */
 const LRCParser = (() => {
   const LRC_RE = /^\[(\d{1,2}):(\d{2})\.(\d{2,3})\]\s*(.*)$/;
-  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|BGIMG|POS|LAYER|OVFX|NOBOX):[^}]+\}|\{LNOBOX\}/g;
+  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|BGIMG|POS|POSX|POSY|LAYER|OVFX|NOBOX):[^}]+\}|\{LNOBOX\}/g;
 
   // Извлекает per-line стиль из rawText
   function extractLineStyle(text) {
@@ -41,6 +41,11 @@ const LRCParser = (() => {
     const colorM = text.match(/\{LCOLOR:(#[0-9a-fA-F]{3,6})\}/);
     const bgImgM = text.match(/\{LBGIMG:([^}]+)\}/);
     const posM   = text.match(/\{LPOS:(top-left|top-right|top|center-left|center-right|center|bottom-left|bottom-right|bottom)\}/i);
+    // Числовой якорь строки в % кадра. Сетка из девяти позиций годится для
+    // субтитра, но не для композиции: чтобы поставить текст относительно
+    // фигуры в кадре, нужна произвольная точка, а не 15/50/85.
+    const posXM  = text.match(/\{LPOSX:(\d{1,3}(?:\.\d+)?)\}/i);
+    const posYM  = text.match(/\{LPOSY:(\d{1,3}(?:\.\d+)?)\}/i);
     const layerM = text.match(/\{LLAYER:(above|below)\}/i);
     const ovfxM  = text.match(/\{LOVFX:(static|sway|pulse|stretch|float|shake|bounce|spin)\}/i);
     const noBoxM = text.match(/\{LNOBOX\}/i);
@@ -50,6 +55,8 @@ const LRCParser = (() => {
     if (colorM) ls.color      = colorM[1];
     if (bgImgM) ls.bgImageKey = bgImgM[1].trim();
     if (posM)   ls.position   = posM[1].toLowerCase();
+    if (posXM)  ls.anchorX    = Math.max(0, Math.min(100, parseFloat(posXM[1])));
+    if (posYM)  ls.anchorY    = Math.max(0, Math.min(100, parseFloat(posYM[1])));
     if (layerM) ls.layer      = layerM[1].toLowerCase();
     if (ovfxM)  ls.overlayEffect = ovfxM[1].toLowerCase();
     if (noBoxM) ls.noBox      = true;
@@ -59,7 +66,9 @@ const LRCParser = (() => {
   // Извлекает все команды фона и камеры из текста
   function extractBackgroundCommands(text) {
     const commands = [];
-    const commandRE = /\/([^\/]+)\//g;
+    // Фигурные скобки исключены: иначе пара закрывающих тегов
+    // ({/GLOW}{/BOXSUB}) читается как команда и текст ломается.
+    const commandRE = /\/([^\/{}]+)\//g;
     let match;
 
     while ((match = commandRE.exec(text)) !== null) {
@@ -131,16 +140,42 @@ const LRCParser = (() => {
     return match ? match[1].trim() : null;
   }
 
+  // Проверяет, является ли строка ending-маркером (концом видео).
+  // Распознаёт секции [конец], [конец видео], [end], [ending], [finale], [outro]
+  // и команды /КОНЕЦ ВИДЕО/, /THE END/, /ENDING/, /FINALE/, /OUTRO/
+  const ENDING_KEYWORDS = ['конец', 'конец видео', 'окончание', 'финал',
+                           'end', 'ending', 'the end', 'finale', 'outro'];
+  function isEndingMarker(text) {
+    const section = extractSectionLabel(text);
+    if (section && ENDING_KEYWORDS.includes(section.trim().toLowerCase())) return true;
+    const cmdMatch = text.match(/\/([^\/]+)\//);
+    if (cmdMatch) {
+      const c = cmdMatch[1].trim().toLowerCase();
+      if (c === 'конец видео' || c === 'the end' || c === 'ending' || c === 'outro' || c === 'finale') return true;
+    }
+    return false;
+  }
+
+  // Маркеры "пустой" строки — пользователь явно ставит их когда не хочет показывать
+  // ни текст, ни рамку (например при чисто инструментальных проигрышах).
+  // Поддерживается несколько форм: (пусто), (empty), —, ---, ... и т.д.
+  const EMPTY_MARKERS = /^(\(пусто\)|\(empty\)|\(нет\)|\(none\)|—|–|-{2,}|\.{3,})$/i;
+  function _stripIfEmptyMarker(s) {
+    if (s && EMPTY_MARKERS.test(s.trim())) return '';
+    return s;
+  }
+
   // Очищает текст от команд, меток секций и line-style тегов.
   // Перевод (всё после >>>) убирается здесь — он хранится в поле translation.
   function cleanText(text) {
     const sepIdx = text.indexOf('>>>');
     if (sepIdx !== -1) text = text.slice(0, sepIdx);
-    return text
+    const cleaned = text
       .replace(LINE_STYLE_RE, '')
-      .replace(/\/[^\/]+\//g, '')
+      .replace(/\/[^\/{}]+\//g, '')
       .replace(/^\[[^\]]+\]\s*/g, '')
       .trim();
+    return _stripIfEmptyMarker(cleaned);
   }
 
   // Извлекает перевод из rawText (текст после >>>)
@@ -148,10 +183,12 @@ const LRCParser = (() => {
     const sepIdx = text.indexOf('>>>');
     if (sepIdx === -1) return null;
     // Очищаем перевод от line-style тегов и команд, но оставляем сам текст
-    return text.slice(sepIdx + 3)
+    const cleaned = text.slice(sepIdx + 3)
       .replace(LINE_STYLE_RE, '')
-      .replace(/\/[^\/]+\//g, '')
-      .trim() || null;
+      .replace(/\/[^\/{}]+\//g, '')
+      .trim();
+    const stripped = _stripIfEmptyMarker(cleaned);
+    return stripped || null;
   }
 
   function parse(raw) {
@@ -175,6 +212,7 @@ const LRCParser = (() => {
           const lineStyle   = extractLineStyle(rawText);
           const text        = cleanText(rawText);
           const translation = extractTranslation(rawText);
+          const isEnding    = isEndingMarker(rawText);
 
           return {
             time: mins * 60 + secs + ms / 1000,
@@ -184,6 +222,7 @@ const LRCParser = (() => {
             section,
             lineStyle,
             translation, // null или строка перевода
+            isEnding,    // true если эта строка — маркер конца видео
           };
         })
         .filter(Boolean)
@@ -197,6 +236,7 @@ const LRCParser = (() => {
         section:    extractSectionLabel(text),
         lineStyle:  extractLineStyle(text),
         translation: extractTranslation(text),
+        isEnding:   isEndingMarker(text),
       }));
     }
   }
@@ -215,5 +255,5 @@ const LRCParser = (() => {
       .join('\n');
   }
 
-  return { parse, serialize, extractBackgroundCommands, extractLineStyle, extractTranslation };
+  return { parse, serialize, extractBackgroundCommands, extractLineStyle, extractTranslation, isEndingMarker };
 })();

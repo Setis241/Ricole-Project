@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-<title>CHROMATYPE — Рамки</title>
+<title>Ricole Project — Рамки</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Bebas+Neue&display=swap" rel="stylesheet" />
@@ -135,11 +135,24 @@ header .header-right {
   line-height: 1.3;
   transition: border-color .12s, color .12s, background .12s;
 }
-.sb:hover { border-color: var(--muted); color: var(--text); }
-.sb.on {
+.sb:hover, .ab:hover { border-color: var(--muted); color: var(--text); }
+.sb.on, .ab.on {
   border-color: var(--accent);
   color: var(--accent);
   background: rgba(232,255,0,.05);
+}
+.ab {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 5px 4px;
+  font-size: 9px;
+  cursor: pointer;
+  text-align: center;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--mono);
+  line-height: 1.3;
+  transition: border-color .12s, color .12s, background .12s;
 }
 
 /* ── Resolution grid ─────────────────────────── */
@@ -324,7 +337,7 @@ canvas {
 <body>
 
 <header>
-  <h1>CHROMATYPE</h1>
+  <h1>RICOLE<span style="display:inline-block;width:1px;height:0.8em;background:#e8ff00;margin:0 11px;vertical-align:middle;opacity:0.65;box-shadow:0 0 6px rgba(232,255,0,0.6);"></span>PROJECT</h1>
   <nav>
     <a href="index.html">Главная</a>
     <a href="timing-editor.html">Редактор</a>
@@ -355,7 +368,16 @@ canvas {
 
       <!-- Стиль -->
       <div class="section">
-        <label>Стиль</label>
+        <label>Плакаты <span style="color:var(--accent);font-size:7px;">// NEW</span></label>
+        <div class="style-grid">
+          <button class="sb"    data-s="swiss"     onclick="setS(this)">▤ Swiss</button>
+          <button class="sb"    data-s="brutal"    onclick="setS(this)">▰ Brutal</button>
+          <button class="sb"    data-s="vapor"     onclick="setS(this)">◐ Vapor</button>
+          <button class="sb"    data-s="broadcast" onclick="setS(this)">⏺ Broadcast</button>
+          <button class="sb"    data-s="bauhaus"   onclick="setS(this)">◆ Bauhaus</button>
+        </div>
+
+        <label style="margin-top:10px;">Орнаменты</label>
         <div class="style-grid" id="stg">
           <button class="sb on" data-s="baroque"   onclick="setS(this)">🏛 Барокко</button>
           <button class="sb"    data-s="cypher"    onclick="setS(this)">✒ Вензеля</button>
@@ -417,6 +439,34 @@ canvas {
         </div>
         <input type="range" id="pad" min="0" max="25" value="4" step="1"
           oninput="document.getElementById('pv').textContent=this.value;draw()" />
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Анимация -->
+      <div class="section">
+        <label>Анимация</label>
+        <div class="style-grid">
+          <button class="ab on" data-a="none"      onclick="setAnimMode('none')">∅ нет</button>
+          <button class="ab"    data-a="pulse"     onclick="setAnimMode('pulse')">◉ пульс</button>
+          <button class="ab"    data-a="breathe"   onclick="setAnimMode('breathe')">○ вдох</button>
+          <button class="ab"    data-a="swing"     onclick="setAnimMode('swing')">∿ качание</button>
+          <button class="ab"    data-a="rotate"    onclick="setAnimMode('rotate')">↻ вращение</button>
+          <button class="ab"    data-a="rainbow"   onclick="setAnimMode('rainbow')">⬢ rainbow</button>
+          <button class="ab"    data-a="sparkle"   onclick="setAnimMode('sparkle')">✦ искры</button>
+          <button class="ab"    data-a="flicker"   onclick="setAnimMode('flicker')">⌗ мерцание</button>
+          <button class="ab"    data-a="glitch"    onclick="setAnimMode('glitch')">⌖ глитч</button>
+          <button class="ab"    data-a="chromatic" onclick="setAnimMode('chromatic')">⌬ хром.</button>
+          <button class="ab"    data-a="march"     onclick="setAnimMode('march')">⋯ ползёт</button>
+        </div>
+        <div id="animParams" style="display:none;margin-top:8px;">
+          <div class="range-row"><label>Сила</label><span id="aav">0.5</span></div>
+          <input type="range" id="aa" min="0" max="1" value="0.5" step="0.05"
+            oninput="animAmt=parseFloat(this.value);document.getElementById('aav').textContent=this.value;" />
+          <div class="range-row" style="margin-top:4px"><label>Скорость</label><span id="asv">1.0</span></div>
+          <input type="range" id="as" min="0.1" max="3" value="1" step="0.1"
+            oninput="animSpeed=parseFloat(this.value);document.getElementById('asv').textContent=this.value;" />
+        </div>
       </div>
 
       <div class="divider"></div>
@@ -515,10 +565,50 @@ function makeCtx(w, h, el) {
   return ctx;
 }
 
-function draw() {
+// ── Animation state ─────────────────────────────
+let animMode = 'none';
+let animAmt = 0.5;
+let animSpeed = 1.0;
+let animRAF = null;
+let animT0 = 0;
+
+function fakeBands(t) {
+  const beatT = (t * 100 / 60) % 1;          // simulate ~100 BPM
+  return {
+    bass: Math.pow(1 - beatT, 3) * 0.85,
+    mid:  (Math.sin(t * 3.2) * 0.5 + 0.5) * 0.55,
+    high: (Math.sin(t * 11)  * 0.5 + 0.5) * 0.4,
+  };
+}
+
+function draw() { drawFrame(0); }
+
+function drawFrame(t) {
   const p   = P();
   const ctx = makeCtx(W, H, document.getElementById('c'));
-  render(ctx, W, H, p);
+  render(ctx, W, H, p, t);
+}
+
+function tick() {
+  if (animMode === 'none') { animRAF = null; return; }
+  const t = (performance.now() - animT0) / 1000;
+  drawFrame(t);
+  animRAF = requestAnimationFrame(tick);
+}
+
+function setAnimMode(mode) {
+  animMode = mode;
+  document.querySelectorAll('.ab').forEach(b => b.classList.toggle('on', b.dataset.a === mode));
+  const params = document.getElementById('animParams');
+  if (params) params.style.display = (mode === 'none') ? 'none' : '';
+  if (mode === 'none') {
+    if (animRAF) cancelAnimationFrame(animRAF);
+    animRAF = null;
+    draw();
+  } else if (!animRAF) {
+    animT0 = performance.now();
+    tick();
+  }
 }
 
 function dl() {
@@ -527,7 +617,10 @@ function dl() {
   c.width = W; c.height = H;
   const ctx = c.getContext('2d');
   ctx.clearRect(0, 0, W, H);
-  render(ctx, W, H, p);
+  // Export всегда статический (t=0), без анимации
+  const savedMode = animMode; animMode = 'none';
+  render(ctx, W, H, p, 0);
+  animMode = savedMode;
   const a = document.createElement('a');
   a.download = `frame_${sty}_${W}x${H}.png`;
   a.href = c.toDataURL('image/png');
@@ -536,13 +629,70 @@ function dl() {
   document.body.removeChild(a);
 }
 
-function render(ctx, W, H, p) {
-  const { fc, th, det, pad } = p;
+function render(ctx, W, H, p, t) {
+  const { th: thRaw, det, pad } = p;
+  let fc = p.fc;
+  // Resolution-aware толщина: th=3 в слайдере → ~3px при 1080p, ~6px при 4K, ~2px при 720p
+  let th  = thRaw * (Math.min(W, H) / 1080);
   const mg = Math.min(W, H) * pad;
+
+  // ── Анимационные трансформации (синхронно с FrameDrawEngine из основного движка) ──
+  let scaleF = 1, extraAlpha = 1, extraRot = 0, extraTransX = 0, extraTransY = 0;
+  let colorOverride = null;
+  if (animMode !== 'none' && t > 0) {
+    const bands = fakeBands(t);
+    const aspd = animSpeed, aamt = animAmt;
+    if (animMode === 'pulse') {
+      th *= 1 + bands.bass * aamt * 1.8;
+    } else if (animMode === 'breathe') {
+      scaleF = 1 + Math.sin(t * 1.2 * aspd) * aamt * 0.04 + bands.bass * aamt * 0.03;
+    } else if (animMode === 'glitch') {
+      if (bands.bass > 0.35) {
+        extraTransX = (Math.random() - 0.5) * bands.bass * aamt * 30;
+        extraTransY = (Math.random() - 0.5) * bands.bass * aamt * 15;
+      }
+    } else if (animMode === 'rainbow') {
+      const hue = ((t * 60 * aspd) % 360);
+      colorOverride = `hsl(${hue}, 90%, 60%)`;
+    } else if (animMode === 'sparkle') {
+      extraAlpha = 0.5 + bands.bass * 0.5;
+    } else if (animMode === 'swing') {
+      extraRot = Math.sin(t * 1.2 * aspd) * aamt * 0.12;
+      scaleF   = 1 + Math.sin(t * 1.2 * aspd) * aamt * 0.02;
+    } else if (animMode === 'rotate') {
+      extraRot = t * aspd * (0.4 + aamt * 1.0);
+    } else if (animMode === 'flicker') {
+      const r  = Math.sin(t * 13.7 * aspd) * Math.cos(t * 7.3 * aspd);
+      const fk = Math.abs(r);
+      if (fk < 0.15 * aamt) extraAlpha = 0.15;
+      else if (fk < 0.35 * aamt) extraAlpha = 0.55;
+      else extraAlpha = 0.85 + bands.bass * 0.15;
+    } else if (animMode === 'chromatic') {
+      extraTransX = Math.sin(t * 11 * aspd) * bands.bass * aamt * 14;
+      extraAlpha = 0.85 + bands.bass * 0.15;
+    } else if (animMode === 'march') {
+      ctx.setLineDash([Math.max(2, th * 2.2), Math.max(2, th * 1.3)]);
+      ctx.lineDashOffset = -t * (5 + aamt * 30) * aspd;
+    }
+  }
+  if (colorOverride) fc = colorOverride;
+
+  ctx.save();
+  if (scaleF !== 1 || Math.abs(extraRot) > 0.0005 || extraTransX || extraTransY) {
+    ctx.translate(W / 2 + extraTransX, H / 2 + extraTransY);
+    if (Math.abs(extraRot) > 0.0005) ctx.rotate(extraRot);
+    if (scaleF !== 1) ctx.scale(scaleF, scaleF);
+    ctx.translate(-W / 2, -H / 2);
+  }
+  if (extraAlpha < 1) ctx.globalAlpha = extraAlpha;
+
   ctx.strokeStyle = fc;
   ctx.fillStyle   = fc;
   ctx.lineWidth   = th;
-  DRAW[sty](ctx, mg, mg, W - mg * 2, H - mg * 2, fc, th, det, W, H);
+  DRAW[sty](ctx, mg, mg, W - mg * 2, H - mg * 2, fc, th, det, W, H, t || 0);
+
+  if (animMode === 'march') ctx.setLineDash([]);
+  ctx.restore();
 }
 
 // ─── helpers ──────────────────────────────────
@@ -1213,6 +1363,321 @@ arabesque(ctx,x,y,w,h,fc,th,det){
       circle(ctx,0,0,r*.25);
     });dot(ctx,0,0,th);ctx.restore();
   });
+},
+
+// ════════════════════════════════════════════════════════════
+//  POSTER LAYOUTS — композиционные шаблоны (digital poster)
+//  не декоративные рамки, а готовые "обложки"
+// ════════════════════════════════════════════════════════════
+swiss(ctx,x,y,w,h,fc,th,det,W,H,t){
+  const sz=Math.min(w,h),F=fc;
+  const year=new Date().getFullYear();
+  // Тонкая внешняя рамка
+  withLW(ctx,th*0.7,()=>rect(ctx,x,y,w,h));
+  // Top-left wordmark
+  ctx.save();ctx.fillStyle=F;ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.font=`700 ${sz*0.044}px "Bebas Neue", sans-serif`;
+  ctx.fillText('RICOLE / PROJECT',x+sz*0.035,y+sz*0.035);
+  ctx.font=`400 ${sz*0.013}px "Space Mono", monospace`;
+  ctx.fillText(`VOL. XII · EDITION ${year}`,x+sz*0.035,y+sz*0.092);
+  ctx.fillText('KINETIC TYPOGRAPHY ENGINE',x+sz*0.035,y+sz*0.112);
+  ctx.restore();
+  // Top-right serial block
+  ctx.save();ctx.fillStyle=F;ctx.font=`400 ${sz*0.012}px "Space Mono", monospace`;
+  ctx.textAlign='right';ctx.textBaseline='top';
+  ctx.fillText('ISBN 978-0-RIC-2026',x+w-sz*0.035,y+sz*0.035);
+  ctx.fillText(`NO. ${String(((W*H)%999)+1).padStart(3,'0')}`,x+w-sz*0.035,y+sz*0.055);
+  ctx.fillText(`${W}×${H} · ${(w/h).toFixed(2)}:1`,x+w-sz*0.035,y+sz*0.075);
+  ctx.restore();
+  // Верхний divider
+  const divY=y+sz*0.145;
+  withLW(ctx,th*0.5,()=>line(ctx,x+sz*0.035,divY,x+w-sz*0.035,divY));
+  // Вертикальная дата справа
+  ctx.save();ctx.translate(x+w-sz*0.022,y+h/2);ctx.rotate(-Math.PI/2);
+  ctx.font=`700 ${sz*0.022}px "Bebas Neue", sans-serif`;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillStyle=F;
+  ctx.fillText('— PRINTED IN RICOLE PROJECT · 2026 —',0,0);
+  ctx.restore();
+  // Тонкая колоночная сетка (slim columns)
+  ctx.save();ctx.globalAlpha=0.22;
+  withLW(ctx,th*0.3,()=>{
+    const cols=6,yA=y+sz*0.18,yB=y+h-sz*0.13;
+    for(let i=1;i<cols;i++){const cx=x+(w/cols)*i;ctx.beginPath();
+      for(let py=yA;py<yB;py+=sz*0.035){ctx.moveTo(cx,py);ctx.lineTo(cx,py+sz*0.018);}
+      ctx.stroke();}
+  });ctx.restore();
+  // Нижний divider
+  const botY=y+h-sz*0.082;
+  withLW(ctx,th*0.5,()=>line(ctx,x+sz*0.035,botY,x+w-sz*0.035,botY));
+  // Бренд + пагинация снизу
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`700 ${sz*0.026}px "Bebas Neue", sans-serif`;ctx.textAlign='left';ctx.textBaseline='bottom';
+  ctx.fillText('01 / 12',x+sz*0.035,y+h-sz*0.028);
+  ctx.font=`400 ${sz*0.012}px "Space Mono", monospace`;
+  ctx.fillText('— FRAMES BY RICOLE PROJECT —',x+sz*0.14,y+h-sz*0.03);
+  ctx.restore();
+  // Псевдо-баркод bottom-right
+  ctx.save();ctx.fillStyle=F;
+  const barX=x+w-sz*0.22,barY=y+h-sz*0.058;
+  for(let i=0;i<36;i++){
+    const seed=(i*13+7)%17;
+    const ww=seed<3?th*1.6:seed<8?th*0.55:th*0.3;
+    ctx.fillRect(barX+i*sz*0.0055,barY,ww,sz*0.028);
+  }ctx.restore();
+  // Реперные крестики (registration marks) в углах
+  [[x,y],[x+w,y],[x+w,y+h],[x,y+h]].forEach(([cx,cy])=>{
+    ctx.save();ctx.translate(cx,cy);const r=sz*0.013;
+    withLW(ctx,th*0.4,()=>{circle(ctx,0,0,r);line(ctx,-r*1.7,0,r*1.7,0);line(ctx,0,-r*1.7,0,r*1.7);});
+    ctx.restore();
+  });
+},
+
+brutal(ctx,x,y,w,h,fc,th,det,W,H,t){
+  const sz=Math.min(w,h),F=fc;
+  // Тяжёлые верх + правый край
+  withLW(ctx,th*5,()=>{line(ctx,x,y,x+w,y);line(ctx,x+w,y,x+w,y+h);});
+  // Тонкие нижний + левый
+  withLW(ctx,th*0.6,()=>{line(ctx,x,y+h,x+w,y+h);line(ctx,x,y,x,y+h);});
+  // Большой блок в углу слева (solid)
+  ctx.save();ctx.fillStyle=F;
+  ctx.fillRect(x,y+h*0.62,sz*0.10,h*0.38);
+  ctx.restore();
+  // Вертикальный лейбл на чёрном блоке
+  ctx.save();ctx.translate(x+sz*0.05,y+h*0.81);ctx.rotate(-Math.PI/2);
+  ctx.fillStyle='#000';ctx.font=`900 ${sz*0.040}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('RICOLE-01',0,0);ctx.restore();
+  // Гигантская цифра "01" в правом нижнем углу
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`900 ${sz*0.34}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='right';ctx.textBaseline='bottom';
+  ctx.fillText('01',x+w-sz*0.04,y+h-sz*0.04);ctx.restore();
+  // Диагональный slash через угол top-left
+  withLW(ctx,th*3,()=>{
+    line(ctx,x,y+sz*0.16,x+sz*0.28,y);
+    line(ctx,x+sz*0.04,y+sz*0.20,x+sz*0.22,y+sz*0.04);
+  });
+  // Большой год в углу top-left
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`900 ${sz*0.062}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText('2026',x+sz*0.32,y+sz*0.04);
+  ctx.font=`400 ${sz*0.012}px "Space Mono", monospace`;
+  ctx.fillText('// FRAME-SYSTEM v.6 // ISSUE №01 // KINETIC',x+sz*0.32,y+sz*0.108);
+  ctx.fillText('RICOLE / PROJECT — RAW EDITION',x+sz*0.32,y+sz*0.128);
+  ctx.restore();
+  // Мелкие случайно-выглядящие annotation-rectangles
+  ctx.save();ctx.fillStyle=F;
+  const annot=[[0.42,0.42,0.08,0.012],[0.55,0.42,0.04,0.012],[0.42,0.46,0.14,0.012]];
+  annot.forEach(([px,py,pw,ph])=>ctx.fillRect(x+w*px,y+h*py,w*pw,sz*ph));
+  ctx.restore();
+  // Большой текстовый блок-нашлёпка слева внизу
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`700 ${sz*0.018}px "Space Mono", monospace`;
+  ctx.textAlign='left';ctx.textBaseline='bottom';
+  ctx.fillText('STR. PROJECT.RICOLE.001 / NO REGRESSION / BUILD STABLE',x+sz*0.13,y+h-sz*0.058);
+  ctx.fillText('LAT 52°22′N · LON 4°53′E · ROOM 04 · ANALOG MODE',x+sz*0.13,y+h-sz*0.035);
+  ctx.restore();
+  // Псевдо-баркод сверху над цифрами
+  ctx.save();ctx.fillStyle=F;
+  const bx=x+w-sz*0.30,by=y+sz*0.04;
+  for(let i=0;i<24;i++){const seed=(i*17+3)%19;
+    const ww=seed<3?th*1.4:seed<9?th*0.5:th*0.3;
+    ctx.fillRect(bx+i*sz*0.0080,by,ww,sz*0.026);}
+  ctx.restore();
+},
+
+vapor(ctx,x,y,w,h,fc,th,det,W,H,t){
+  const sz=Math.min(w,h);
+  const PINK='#ff2ad8',CYAN='#00e5ff',MAG='#ff2dd6',WH='#ffffff';
+  // Solid horizon line делящая верх/низ
+  const horY=y+h*0.55;
+  // Нижняя сетка-перспектива (vaporwave grid floor)
+  ctx.save();ctx.strokeStyle=PINK;ctx.globalAlpha=0.85;
+  withLW(ctx,th*0.8,()=>{
+    // продольные сходящиеся линии
+    const cols=14,vx=x+w/2,vy=horY;
+    for(let i=0;i<=cols;i++){const k=(i/cols-0.5)*2;
+      const bx=x+w/2+k*w*0.65;
+      ctx.beginPath();ctx.moveTo(bx,y+h);ctx.lineTo(vx,vy);ctx.stroke();}
+    // горизонтальные слои с перспективным сжатием
+    const rows=10;
+    for(let i=1;i<=rows;i++){const k=Math.pow(i/rows,2.2);
+      const yy=horY+k*(y+h-horY);
+      const xw=k*(w*0.65);
+      ctx.beginPath();ctx.moveTo(x+w/2-xw,yy);ctx.lineTo(x+w/2+xw,yy);ctx.stroke();}
+  });ctx.restore();
+  // Half-sun над горизонтом с горизонтальными вырезами
+  ctx.save();ctx.fillStyle=PINK;
+  const sunR=sz*0.20,sunCx=x+w/2,sunCy=horY;
+  ctx.beginPath();ctx.arc(sunCx,sunCy,sunR,Math.PI,0);ctx.fill();
+  // вырезы (cutout stripes)
+  ctx.globalCompositeOperation='destination-out';
+  for(let i=0;i<6;i++){const yy=sunCy-sunR*(0.45+i*0.09);
+    ctx.fillRect(sunCx-sunR,yy,sunR*2,sz*(0.012+i*0.005));}
+  ctx.globalCompositeOperation='source-over';
+  ctx.restore();
+  // Линия горизонта
+  ctx.save();ctx.strokeStyle=CYAN;
+  withLW(ctx,th*1.5,()=>line(ctx,x+sz*0.06,horY,x+w-sz*0.06,horY));
+  ctx.restore();
+  // Заголовок с хроматическим оффсетом (PINK + CYAN ghosts + WH base)
+  ctx.save();ctx.font=`900 ${sz*0.13}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  const tx=x+w/2,ty=y+h*0.20;
+  ctx.fillStyle=CYAN;ctx.fillText('RICOLE',tx-sz*0.014,ty);
+  ctx.fillStyle=MAG;ctx.fillText('RICOLE',tx+sz*0.014,ty);
+  ctx.fillStyle=WH;ctx.fillText('RICOLE',tx,ty);
+  ctx.font=`700 ${sz*0.022}px "Space Mono", monospace`;
+  ctx.fillStyle=PINK;
+  ctx.fillText('— ESTABLISHED 2026 —',tx,ty+sz*0.078);
+  ctx.restore();
+  // Звёздные искры (sparkles)
+  ctx.save();ctx.fillStyle=WH;
+  const stars=[[0.12,0.10],[0.86,0.14],[0.18,0.30],[0.78,0.32],[0.07,0.43],[0.92,0.45]];
+  stars.forEach(([px,py])=>{const cx=x+w*px,cy=y+h*py,r=sz*0.009;
+    ctx.beginPath();ctx.moveTo(cx,cy-r);ctx.lineTo(cx+r*0.25,cy-r*0.25);ctx.lineTo(cx+r,cy);
+    ctx.lineTo(cx+r*0.25,cy+r*0.25);ctx.lineTo(cx,cy+r);ctx.lineTo(cx-r*0.25,cy+r*0.25);
+    ctx.lineTo(cx-r,cy);ctx.lineTo(cx-r*0.25,cy-r*0.25);ctx.closePath();ctx.fill();});
+  ctx.restore();
+  // Scan lines
+  ctx.save();ctx.globalAlpha=0.10;ctx.fillStyle='#000';
+  for(let yy=y;yy<y+h;yy+=th*2.2)ctx.fillRect(x,yy,w,th*0.8);
+  ctx.restore();
+  // Тонкая внешняя рамка (CYAN)
+  ctx.save();ctx.strokeStyle=CYAN;
+  withLW(ctx,th*0.6,()=>rect(ctx,x,y,w,h));
+  ctx.restore();
+},
+
+broadcast(ctx,x,y,w,h,fc,th,det,W,H,t){
+  const sz=Math.min(w,h),F=fc;
+  // Top header band (заливка)
+  const headH=sz*0.075;
+  ctx.save();ctx.fillStyle=F;ctx.fillRect(x,y,w,headH);ctx.restore();
+  // REC indicator + timestamp + LIVE
+  ctx.save();ctx.fillStyle='#000';
+  ctx.font=`700 ${sz*0.025}px "Space Mono", monospace`;
+  ctx.textAlign='left';ctx.textBaseline='middle';
+  // RED dot (пульсирующий)
+  const dotR=sz*0.013;
+  ctx.fillStyle='#ff2d55';
+  dot(ctx,x+sz*0.04+dotR,y+headH/2,dotR);
+  ctx.fillStyle='#000';
+  ctx.fillText('● REC',x+sz*0.075,y+headH/2);
+  ctx.fillText('RICOLE / BROADCAST 01',x+sz*0.18,y+headH/2);
+  // Timestamp в правом углу header
+  ctx.textAlign='right';
+  const ts=`${String(Math.floor(t)%60).padStart(2,'0')}:${String(Math.floor(t*1000)%1000).padStart(3,'0')}`;
+  ctx.fillText(`T+ ${ts}`,x+w-sz*0.075,y+headH/2);
+  ctx.fillText('LIVE',x+w-sz*0.04,y+headH/2);
+  ctx.restore();
+  // Под header — горизонтальная тонкая линия
+  withLW(ctx,th*0.4,()=>line(ctx,x,y+headH+sz*0.008,x+w,y+headH+sz*0.008));
+  // Вертикальные chyron-метки слева и справа (CHANNEL / SIG)
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`700 ${sz*0.014}px "Space Mono", monospace`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.translate(x+sz*0.022,y+h*0.5);ctx.rotate(-Math.PI/2);
+  ctx.fillText('CH.01 · SIG.OK · 60FPS',0,0);ctx.restore();
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`700 ${sz*0.014}px "Space Mono", monospace`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.translate(x+w-sz*0.022,y+h*0.5);ctx.rotate(Math.PI/2);
+  ctx.fillText('REC · ROLL.001 · MASTER',0,0);ctx.restore();
+  // Lower-third banner
+  const lwY=y+h*0.78,lwH=sz*0.085;
+  ctx.save();ctx.fillStyle=F;
+  ctx.fillRect(x+sz*0.04,lwY,w*0.45,lwH);
+  // Тонкая полоска подложка
+  ctx.globalAlpha=0.55;
+  ctx.fillRect(x+sz*0.04,lwY+lwH+sz*0.004,w*0.28,sz*0.012);
+  ctx.restore();
+  // Текст внутри lower-third
+  ctx.save();ctx.fillStyle='#000';
+  ctx.font=`900 ${sz*0.045}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText('TITLE / SLOT',x+sz*0.055,lwY+sz*0.011);
+  ctx.font=`400 ${sz*0.013}px "Space Mono", monospace`;
+  ctx.fillText('— subtitle area / kinetic type insert —',x+sz*0.055,lwY+sz*0.054);
+  ctx.restore();
+  // Угловые tracking crosshairs
+  [[x,y+headH+sz*0.04],[x+w,y+headH+sz*0.04],[x+w,y+h],[x,y+h]].forEach(([cx,cy],i)=>{
+    if(i>1)return; // только верхние два под header
+    ctx.save();ctx.translate(cx,cy);const r=sz*0.020;
+    const sx=cx===x?1:-1;
+    withLW(ctx,th*1.4,()=>{line(ctx,sx*r*0.2,0,sx*r*1.4,0);line(ctx,0,r*0.2,0,r*1.4);});
+    ctx.restore();
+  });
+  // Нижний ticker — серия мелких отметок
+  const tkY=y+h-sz*0.030;
+  ctx.save();ctx.fillStyle=F;
+  for(let i=0;i<60;i++){const px=x+sz*0.04+i*((w-sz*0.08)/60);
+    const hh=(i%7===0)?sz*0.018:(i%3===0)?sz*0.010:sz*0.005;
+    ctx.fillRect(px,tkY,th*0.6,hh);}
+  ctx.font=`400 ${sz*0.011}px "Space Mono", monospace`;
+  ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText('// SCRUB · 00:00 — 03:45 // FRAMES: 0/5400 //',x+sz*0.04,tkY+sz*0.025);
+  ctx.restore();
+  // Внешняя рамка тонкая
+  withLW(ctx,th*0.6,()=>rect(ctx,x,y,w,h));
+},
+
+bauhaus(ctx,x,y,w,h,fc,th,det,W,H,t){
+  const sz=Math.min(w,h),F=fc;
+  const RED='#e63946',BLUE='#1d3557',YEL='#ffd60a';
+  // Тонкая внешняя рамка
+  withLW(ctx,th*0.7,()=>rect(ctx,x,y,w,h));
+  // Заливочный красный квадрат — top-left угол
+  ctx.save();ctx.fillStyle=RED;
+  ctx.fillRect(x+sz*0.04,y+sz*0.04,sz*0.22,sz*0.22);
+  ctx.restore();
+  // Жёлтый круг — bottom-right
+  ctx.save();ctx.fillStyle=YEL;
+  ctx.beginPath();ctx.arc(x+w-sz*0.16,y+h-sz*0.16,sz*0.13,0,τ);ctx.fill();
+  ctx.restore();
+  // Синий треугольник — bottom-left
+  ctx.save();ctx.fillStyle=BLUE;
+  ctx.beginPath();
+  ctx.moveTo(x+sz*0.05,y+h-sz*0.05);
+  ctx.lineTo(x+sz*0.32,y+h-sz*0.05);
+  ctx.lineTo(x+sz*0.05,y+h-sz*0.30);
+  ctx.closePath();ctx.fill();
+  ctx.restore();
+  // Толстая чёрная диагональ через композицию
+  ctx.save();ctx.strokeStyle=F;
+  withLW(ctx,th*3.5,()=>line(ctx,x+w*0.30,y,x+w,y+h*0.78));
+  ctx.restore();
+  // Большое число "01" в верхнем правом
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`900 ${sz*0.18}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='right';ctx.textBaseline='top';
+  ctx.fillText('01',x+w-sz*0.04,y+sz*0.04);
+  ctx.font=`700 ${sz*0.018}px "Space Mono", monospace`;
+  ctx.fillText('— ISSUE —',x+w-sz*0.04,y+sz*0.215);
+  ctx.restore();
+  // Лейбл в центре композиции (мелкий)
+  ctx.save();ctx.fillStyle=F;
+  ctx.font=`900 ${sz*0.044}px "Bebas Neue", sans-serif`;
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('RICOLE',x+w*0.5,y+h*0.50);
+  ctx.font=`400 ${sz*0.014}px "Space Mono", monospace`;
+  ctx.fillText('— BAUHAUS POSTER · MODULAR LAYOUT —',x+w*0.5,y+h*0.555);
+  ctx.restore();
+  // Маленький белый круг в красном квадрате
+  ctx.save();ctx.fillStyle='#fff';
+  ctx.beginPath();ctx.arc(x+sz*0.04+sz*0.22-sz*0.04,y+sz*0.04+sz*0.04,sz*0.017,0,τ);ctx.fill();
+  ctx.restore();
+  // Тонкие annotation-рамки и засечки
+  ctx.save();ctx.strokeStyle=F;ctx.fillStyle=F;
+  withLW(ctx,th*0.4,()=>{
+    line(ctx,x+sz*0.04,y+sz*0.30,x+sz*0.20,y+sz*0.30);
+    line(ctx,x+sz*0.04,y+sz*0.30,x+sz*0.04,y+sz*0.34);
+  });
+  ctx.font=`400 ${sz*0.011}px "Space Mono", monospace`;
+  ctx.textAlign='left';ctx.textBaseline='top';
+  ctx.fillText('FIG. 01 — PRIMARY COLOR BLOCK',x+sz*0.04,y+sz*0.31);
+  ctx.fillText('220 × 220 PX · #E63946',x+sz*0.04,y+sz*0.328);
+  ctx.restore();
 }
 };
 

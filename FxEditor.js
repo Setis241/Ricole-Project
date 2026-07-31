@@ -52,6 +52,13 @@ const FxEditor = (() => {
     { label: '🪐 Orbit',        value: 'orbit' },
     { label: '💧 Ripple',       value: 'ripple' },
     { label: '🌟 Nova',         value: 'nova' },
+    { label: '📰 Headline',     value: 'headline' },
+    { label: '🅰 Tracking',      value: 'tracking' },
+    { label: '📐 Ragged',        value: 'ragged' },
+    { label: '▦ Justify',       value: 'justify' },
+    { label: '🅿 Poster',        value: 'poster' },
+    { label: '▩ Backdrop',      value: 'backdrop' },
+    { label: '⧉ Echo',          value: 'echo' },
     { label: '🎬 Montage',      value: 'montage' },
     { label: '🌊 Drift',        value: 'drift' },
     { label: '── Прокрутка ──', value: '',       disabled: true },
@@ -2972,6 +2979,49 @@ const FxEditor = (() => {
         colorRow.appendChild(cInp);
         cont.appendChild(colorRow);
 
+        // ── Слоты редактируемых текстов (для постер-стилей) ──
+        const slotSchema = (FDE && FDE.FRAME_SLOTS_SCHEMA && FDE.FRAME_SLOTS_SCHEMA[card.frameStyle]) || null;
+        if (slotSchema && slotSchema.length) {
+          const slotsLab = document.createElement('div');
+          slotsLab.className = 'fxe-cd-section-sublabel';
+          slotsLab.textContent = '✎ тексты рамки';
+          slotsLab.style.cssText = 'margin-top:10px;font-size:9px;letter-spacing:2px;color:#e8ff00;text-transform:uppercase;';
+          cont.appendChild(slotsLab);
+
+          const slotsCur = card.frameSlots || {};
+          slotSchema.forEach(sl => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;flex-direction:column;gap:3px;margin-bottom:6px;';
+            const lab = document.createElement('label');
+            lab.textContent = sl.label;
+            lab.style.cssText = 'font-size:9px;color:#888;letter-spacing:0.5px;';
+            row.appendChild(lab);
+            const inp = document.createElement('textarea');
+            inp.className = 'fxe-ov-textarea';
+            inp.rows = (sl.def && sl.def.length > 40) ? 2 : 1;
+            inp.placeholder = sl.def || '';
+            inp.value = (slotsCur[sl.key] != null) ? slotsCur[sl.key] : '';
+            inp.addEventListener('input', () => {
+              const next = { ...(card.frameSlots || {}) };
+              next[sl.key] = inp.value;
+              BackgroundEngine.updateOverlay(card.id, { frameSlots: next });
+            });
+            row.appendChild(inp);
+            cont.appendChild(row);
+          });
+
+          // Reset to defaults
+          const resetBtn = document.createElement('button');
+          resetBtn.className = 'fxe-cd-block-more-btn';
+          resetBtn.textContent = '↺ сбросить все тексты';
+          resetBtn.style.cssText = 'margin-top:4px;font-size:9px;';
+          resetBtn.addEventListener('click', () => {
+            BackgroundEngine.updateOverlay(card.id, { frameSlots: {} });
+            renderCardsPanel();
+          });
+          cont.appendChild(resetBtn);
+        }
+
         // Подробнее → толщина, детализация, отступ, поворот, анимация
         const advKey = `${card.id}::frame`;
         const advOpen = _blockAdvancedOpen.has(advKey);
@@ -2993,6 +3043,24 @@ const FxEditor = (() => {
           params.appendChild(_mkSlider(card, 'framePad',       'Отступ %',   0,    25,  1, 0));
           params.appendChild(_mkSlider(card, 'frameRotation',  'Поворот°', -180, 180, 1, 0));
           cont.appendChild(params);
+
+          // Чекбокс «Скрывать на пустых строках» — карточка прячется на технических строках
+          const hideRow = document.createElement('label');
+          hideRow.className = 'fxe-cd-toggle-row';
+          hideRow.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 2px;cursor:pointer;font-size:10px;color:#bbb;user-select:none;';
+          hideRow.title = 'Не показывать карточку на технических строках (только команды, без текста)';
+          const hideCb = document.createElement('input');
+          hideCb.type = 'checkbox';
+          hideCb.className = 'fxe-ov-checkbox';
+          hideCb.checked = card.hideOnEmptyLyric !== false;
+          hideCb.addEventListener('change', () => {
+            BackgroundEngine.updateOverlay(card.id, { hideOnEmptyLyric: hideCb.checked });
+          });
+          const hideTxt = document.createElement('span');
+          hideTxt.textContent = 'Прятать на пустых (технических) строках';
+          hideRow.appendChild(hideCb);
+          hideRow.appendChild(hideTxt);
+          cont.appendChild(hideRow);
 
           // Анимация
           const animLab = document.createElement('div');
@@ -4458,7 +4526,15 @@ const FxEditor = (() => {
       _cdPreviewCard = liveCard;
 
       if (liveCard && liveCard.type === 'card') {
-        const bands = { bass: 0, mid: 0, high: 0, overall: 0 };
+        // Синтетические bands ~100 BPM для preview — без них bass-driven анимации
+        // (pulse/glitch/sparkle/chromatic) выглядят статично.
+        const beatT = (now * 100 / 60) % 1;
+        const bands = {
+          bass:    Math.pow(1 - beatT, 3) * 0.85,
+          mid:     (Math.sin(now * 3.2) * 0.5 + 0.5) * 0.55,
+          high:    (Math.sin(now * 11)  * 0.5 + 0.5) * 0.4,
+          overall: 0.5,
+        };
         if (BackgroundEngine._previewDrawCard) {
           BackgroundEngine._previewDrawCard(ctx, liveCard, w, h, bands, now);
         }
@@ -4841,6 +4917,7 @@ const FxEditor = (() => {
       { value:'stretch',   label:'Растяжение'         },
       { value:'float',     label:'Плавание'           },
       { value:'breathe',   label:'🫁 Дыхание'         },
+      { value:'presence',  label:'🫥 Присутствие'      },
       { value:'drift',     label:'🌊 Дрейф'           },
       { value:'orbit',     label:'🪐 Орбита'          },
       { value:'bounce',    label:'Отскок'             },
@@ -5294,6 +5371,23 @@ const FxEditor = (() => {
         secFrameParams.appendChild(makeSlider('Отступ %',    'framePad',       0,  25, 1,    ov.framePad       ?? 0));
         secFrameParams.appendChild(makeSlider('Поворот°',    'frameRotation',  -180, 180, 1, ov.frameRotation  ?? 0));
         secFrameParams.appendChild(makeSlider('Прозрачность','opacity',        0,  1,  0.01, ov.opacity));
+
+        // Чекбокс «Скрывать на пустых строках» — рамка прячется на технических
+        // строках (когда у активной лирики нет видимого текста, только команды).
+        const rowHide = document.createElement('div');
+        rowHide.className = 'fxe-ov-row';
+        const hideCb = makeCheckbox(ov.hideOnEmptyLyric !== false, 'Скрывать рамку когда у активной строки нет текста', v => {
+          BackgroundEngine.updateOverlay(ov.id, { hideOnEmptyLyric: v });
+        });
+        const hideLbl = document.createElement('span');
+        hideLbl.className = 'fxe-ov-row-label';
+        hideLbl.textContent = 'Прятать на пустых строках';
+        hideLbl.style.flex = '1';
+        hideLbl.title = 'Не показывать рамку на технических строках (только команды, без текста)';
+        rowHide.appendChild(hideCb);
+        rowHide.appendChild(hideLbl);
+        secFrameParams.appendChild(rowHide);
+
         body.appendChild(secFrameParams);
 
         // ── СЕКЦИЯ: Анимация рамки ─────────────────────
@@ -6105,6 +6199,14 @@ const FxEditor = (() => {
       case 'breathe':
         scaleX = scaleY = 1 + Math.sin(t * 0.9) * 0.12 * amt + Math.sin(t * 2.3) * 0.05 * amt;
         break;
+      case 'presence': {
+        // В превью реального звука нет — эмулируем БИТ (короткие удары),
+        // а не плавную волну: сам эффект в движке синусов от времени не имеет.
+        const simBass = Math.pow(Math.abs(Math.sin(t * 2.4)), 6);
+        const kick = Math.max(0, simBass - 0.22);
+        scaleX = scaleY = 1 + (kick * 0.55 + 0.12 * 0.20) * amt;
+        break;
+      }
       case 'glitch':
         offsetX = (Math.random() > 0.6 ? (Math.random() - 0.5) * 40 : 0) * amt;
         offsetY = (Math.random() > 0.8 ? (Math.random() - 0.5) * 15 : 0) * amt;

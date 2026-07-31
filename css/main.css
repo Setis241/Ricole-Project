@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════
-   CHROMATYPE · main.css
+   Ricole Project · main.css
    Modern Professional UI - Enhanced & Polished
 ═══════════════════════════════════════════════ */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Bebas+Neue&family=Montserrat:wght@700;900&family=Oswald:wght@600;700&family=Russo+One&family=Exo+2:wght@700;900&family=Play:wght@700&family=Comfortaa:wght@700&family=Jura:wght@700&family=Rubik:wght@700;900&family=Raleway:wght@800;900&display=swap&subset=cyrillic');
@@ -53,6 +53,101 @@ header h1 {
   color: var(--accent);
   line-height: 1;
 }
+
+/* ═══════════════════════════════════════════════
+   BRAND PLATE — Ricole | Project (kinetic monogram)
+═══════════════════════════════════════════════ */
+.brand {
+  --tick:    10px;
+  --tick-w:  1.5px;
+  --tick-c:  var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 8px 20px;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid rgba(232,255,0,0.20);
+  border-radius: 0;
+  background:
+    linear-gradient(var(--tick-c), var(--tick-c)) top    left  / var(--tick)   var(--tick-w) no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) top    left  / var(--tick-w) var(--tick)   no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) top    right / var(--tick)   var(--tick-w) no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) top    right / var(--tick-w) var(--tick)   no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) bottom left  / var(--tick)   var(--tick-w) no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) bottom left  / var(--tick-w) var(--tick)   no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) bottom right / var(--tick)   var(--tick-w) no-repeat,
+    linear-gradient(var(--tick-c), var(--tick-c)) bottom right / var(--tick-w) var(--tick)   no-repeat,
+    linear-gradient(135deg, rgba(232,255,0,0.08) 0%, rgba(255,255,255,0.015) 40%, rgba(0,0,0,0.30) 100%),
+    repeating-linear-gradient(90deg, rgba(232,255,0,0.035) 0 1px, transparent 1px 6px);
+  position: relative;
+  overflow: hidden;
+  transition: border-color .25s ease, transform .15s ease, box-shadow .25s ease;
+}
+.brand:hover {
+  --tick-c: #f6ff5e;
+  border-color: rgba(232,255,0,0.55);
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px -8px rgba(232,255,0,0.30);
+}
+.brand-mark {
+  width: 44px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  filter: drop-shadow(0 0 6px rgba(232,255,0,0.30));
+}
+.brand-mark svg { width: 100%; height: 100%; }
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.brand-name {
+  font-family: var(--display);
+  font-weight: 900;
+  font-size: 23px;
+  line-height: 1;
+  letter-spacing: 3px;
+  color: var(--text);
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.brand-name-sub {
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 4px;
+  font-size: 14px;
+  text-shadow: 0 0 14px rgba(232,255,0,0.45);
+  padding: 4px 0 4px 12px;
+  margin-left: 12px;
+  border-left: 1px solid rgba(232,255,0,0.55);
+}
+.brand-tag {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 2.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.brand-tag::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(232,255,0,0.85);
+  border-radius: 50%;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
 header nav { display: flex; gap: 6px; margin-left: 16px; }
 header nav a {
   font-family: var(--mono);
@@ -762,12 +857,22 @@ canvas#spectrumCanvas {
 @media (max-width: 1024px) {
   .workspace { grid-template-columns: 260px 1fr 220px; }
   header h1 { font-size: 20px; letter-spacing: 3px; }
+  .brand { padding: 4px 16px 4px 8px; gap: 9px; }
+  .brand-mark { width: 32px; height: 32px; }
+  .brand-name { font-size: 18px; letter-spacing: 2px; }
+  .brand-name-sub { font-size: 13px; letter-spacing: 3px; }
+  .brand-tag { font-size: 7.5px; letter-spacing: 1.5px; }
 }
 
 @media (max-width: 768px) {
   body { grid-template-rows: 48px 1fr; }
   header { padding: 0 12px; gap: 10px; }
   header h1 { font-size: 16px; letter-spacing: 2px; }
+  .brand { padding: 3px 14px 3px 6px; gap: 7px; border-radius: 8px; }
+  .brand-mark { width: 28px; height: 28px; }
+  .brand-name { font-size: 15px; letter-spacing: 1.5px; }
+  .brand-name-sub { font-size: 11px; letter-spacing: 2.5px; }
+  .brand-tag { display: none; }
   header nav { margin-left: 10px; }
   header nav a { font-size: 8px; padding: 5px 8px; }
   .status-pill { font-size: 8px; }

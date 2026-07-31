@@ -772,12 +772,25 @@ const BackgroundEngine = (() => {
   //   ctx.save() + translate(center+pan) + rotate + scale(zoom) + translate(-center).
   // Вызывается ПЕРЕД рендером фона, после — обязательно ctx.restore().
   // Возвращает true если transform был применён (то есть нужен restore).
-  function applySceneTransform(ctx, cw, ch, bands, t) {
+  /* Та же самая камера, но применённая ЧАСТИЧНО (k = 0..1).
+
+     Зачем: сцена камеры двигала только фон, а объекты и текст рисовались
+     на жёстко неподвижной плоскости. Из-за этого кадр разваливался на два
+     несвязанных слоя — сзади едет кино, спереди приклеены субтитры и
+     спрайт. Ни в одном клипе так не бывает: камера снимает СЦЕНУ целиком,
+     и всё, что в кадре, движется вместе, просто с разной силой — чем
+     дальше план, тем меньше смещение.
+
+     Поэтому передний план получает ту же самую трансформацию с
+     коэффициентом: тот же ритм, та же фаза удара, меньше амплитуда. */
+  function applySceneTransform(ctx, cw, ch, bands, t, k) {
+    const strength = (k == null) ? 1 : Math.max(0, Math.min(1, k));
+    if (strength < 0.001) return false;
     const sv = evaluateLineScene(bands, t);
     if (!sv || sv.blend < 0.001) return false;
 
-    // Лерпим к нейтрали в зависимости от blend
-    const blend = sv.blend;
+    // Лерпим к нейтрали в зависимости от blend и от силы плана
+    const blend = sv.blend * strength;
     const zoom  = 1 + (sv.zoom - 1) * blend;
     if (Math.abs(zoom - 1) < 0.001 && Math.abs(sv.rot) < 0.0005 &&
         Math.abs(sv.shakeX) < 0.5 && Math.abs(sv.shakeY) < 0.5 &&
@@ -801,6 +814,31 @@ const BackgroundEngine = (() => {
     ctx.scale(zoom, zoom);
     ctx.translate(-cw / 2, -ch / 2);
     return true;
+  }
+
+  /* ── КАМЕРА ПЕРЕДНЕГО ПЛАНА, ПООБЪЕКТНО ────────────────────
+     Весь передний план (объекты + текст) едет с ОДНИМ ослабленным
+     коэффициентом (FOREGROUND_CAM в App.js). Для текста это правильно: он
+     графический слой поверх кадра, и таскать его наравне с фоном значит
+     сделать его нечитаемым. Но персонаж — не надпись, он ФИЗИЧЕСКИ СТОИТ
+     В СЦЕНЕ. Когда камера наезжает на фон в полтора раза, а фигура растёт
+     лишь на четверть от этого, она отклеивается от сцены — тот самый
+     диссонанс: задник едет, наклейка стоит.
+
+
+     Поэтому объект может объявить свой ov.camFollow, и тогда его готовый
+     кадр кладётся на холст не с общей трансформацией переднего плана, а со
+     своей. Работает потому, что каждый объект сперва рисуется на временный
+     холст и лишь затем блитится — подменить трансформацию нужно только на
+     сам блит. */
+  let _fgCamBase = null;   // матрица холста ДО камеры переднего плана
+  let _fgCamK    = null;   // коэффициент, с которым эта камера применена
+  /* Во сколько раз бас сейчас растянул ФОН (1 = баса нет). Пишется в
+     drawMedia, читается объектами с camFollow — см. там же. */
+  let _bgBassZoom = 1;
+  function setForegroundCam(baseMatrix, k) {
+    _fgCamBase = baseMatrix || null;
+    _fgCamK    = (k == null) ? null : k;
   }
 
   // ── Коллекция именованных сцен ──────────────
@@ -1028,6 +1066,29 @@ const BackgroundEngine = (() => {
     textCam.panX    = 0;
     textCam.panY    = 0;
     textCam._decay  = 0;
+  }
+
+  // Тик decay — вызывается один раз за кадр из App.js/ExportEngine ПЕРЕД
+  // отрисовкой фона. Раньше decay тикался внутри drawMedia(), но тогда
+  // BackgroundManager не мог использовать text-driven camera (он не вызывал
+  // drawMedia). Теперь decay централизован, а оба бэкенда читают только
+  // эффективные значения через getEffectiveTextCamera().
+  function tickTextDrivenCamera(dt) {
+    if (textCam._decay > 0) {
+      textCam._decay -= Math.max(dt, 0.001) / 0.15;
+      if (textCam._decay < 0) textCam._decay = 0;
+    }
+  }
+
+  function getEffectiveTextCamera() {
+    const k = textCam._decay;
+    if (k <= 0) return { zoomMul: 1, panX: 0, panY: 0, active: false };
+    return {
+      zoomMul: 1 + (textCam.zoomMul - 1) * k,
+      panX:    textCam.panX * k,
+      panY:    textCam.panY * k,
+      active:  true,
+    };
   }
 
   // ── Плавные переходы для эффектов ────────────
@@ -1410,6 +1471,7 @@ const BackgroundEngine = (() => {
       fadeAlpha:    0,
       fadeTarget:   1,
       fadeSpeed:    2.5,
+      hideOnEmptyLyric: true,  // прятать на технических строках без текста
     };
     overlays.push(ov);
     _notifyOverlayChange();
@@ -1507,6 +1569,7 @@ const BackgroundEngine = (() => {
       fadeAlpha:    0,
       fadeTarget:   1,
       fadeSpeed:    2.5,
+      hideOnEmptyLyric: true,     // прятать рамку на технических строках без текста
     };
     overlays.push(ov);
     _notifyOverlayChange();
@@ -1665,7 +1728,7 @@ const BackgroundEngine = (() => {
     if (effectType === 'softBloom')    return { bassEnv: 0 };
     if (effectType === 'bassAura')     return { bassEnv: 0 };
     if (effectType === 'waveform')     return { phase: 0, bassEnv: 0, midEnv: 0, highEnv: 0 };
-    if (effectType === 'spectrumBars') return { bars: new Array(32).fill(0) };
+    if (effectType === 'spectrumBars') return { bars: new Array(48).fill(0), peaks: new Array(48).fill(0) };
     if (effectType === 'pulseSphere')  return { bassEnv: 0, breathe: 0 };
     return {};
   }
@@ -2535,33 +2598,49 @@ const BackgroundEngine = (() => {
       case 'godRays': {
         const lpf = 0.90;
         st.bassEnv = (st.bassEnv || 0) * lpf + (bands.bass || 0) * (1 - lpf);
-        st.phase = (st.phase || 0) + dts * 0.25;
+        st.phase = (st.phase || 0) + dts * 0.12;  // медленное вращение всей короны
         const cx = (ov.x / 100) * cw;
         const cy = (ov.y / 100) * ch;
-        const rayLen = Math.max(cw, ch) * 1.6;
-        const numRays = 10 + Math.floor(intensity * 14);
+        const rayLen = Math.max(cw, ch) * 1.8;
+        const numRays = 14 + Math.floor(intensity * 22);  // больше лучей в полной короне
         ctx.save();
         ctx.translate(cx, cy);
+        ctx.rotate(st.phase);  // вся корона медленно поворачивается
         ctx.globalCompositeOperation = 'lighter';
-        // Лучи направлены примерно к центру кадра (от cx,cy в сторону mid)
-        const aimX = cw / 2 - cx, aimY = ch / 2 - cy;
-        const baseAng = Math.atan2(aimY, aimX);
-        const coneSpread = 0.7;  // ширина «веера»
+        // Полная корона: лучи равномерно распределены по 0..2π
         for (let i = 0; i < numRays; i++) {
-          const u = (i / (numRays - 1)) - 0.5;  // -0.5 .. 0.5
-          const wobble = Math.sin(st.phase + i * 0.7) * 0.05;
-          const a = baseAng + (u * coneSpread + wobble);
+          const a = (i / numRays) * Math.PI * 2;
+          // Псевдо-случайные вариации ширины/яркости для естественности
+          const seed = Math.sin(i * 2.7) * 0.5 + 0.5;          // 0..1
+          const wobble = Math.sin(st.phase * 3 + i * 1.3) * 0.15 + 0.85;  // 0.7..1.0
           ctx.save();
           ctx.rotate(a);
-          const w = (20 + (numRays - i) * 5) * (1 + st.bassEnv * 0.4);
-          const alphaR = (0.18 * intensity) * (0.7 + st.bassEnv * 0.4);
+          const w = (8 + seed * 28) * wobble * (1 + st.bassEnv * 0.5);
+          const alphaR = (0.14 * intensity) * (0.55 + seed * 0.45) * (0.75 + st.bassEnv * 0.35);
           const g = ctx.createLinearGradient(0, 0, rayLen, 0);
-          g.addColorStop(0, `rgba(${c.r},${c.g},${c.b},${alphaR})`);
-          g.addColorStop(1, `rgba(${c.r},${c.g},${c.b},0)`);
+          g.addColorStop(0,    `rgba(${c.r},${c.g},${c.b},${alphaR})`);
+          g.addColorStop(0.5,  `rgba(${c.r},${c.g},${c.b},${alphaR * 0.45})`);
+          g.addColorStop(1,    `rgba(${c.r},${c.g},${c.b},0)`);
           ctx.fillStyle = g;
-          ctx.fillRect(0, -w / 2, rayLen, w);
+          // Луч-трапеция: сужается к концу для естественной формы
+          ctx.beginPath();
+          ctx.moveTo(0, -w / 2);
+          ctx.lineTo(0,  w / 2);
+          ctx.lineTo(rayLen,  w * 0.15);
+          ctx.lineTo(rayLen, -w * 0.15);
+          ctx.closePath();
+          ctx.fill();
           ctx.restore();
         }
+        // Центральное ядро короны (мягкое сияние)
+        const coreR = Math.max(cw, ch) * 0.18 * (0.9 + st.bassEnv * 0.3);
+        const coreA = 0.35 * intensity + st.bassEnv * 0.20;
+        const cg = ctx.createRadialGradient(0, 0, 0, 0, 0, coreR);
+        cg.addColorStop(0,   `rgba(${c.r},${c.g},${c.b},${coreA})`);
+        cg.addColorStop(0.5, `rgba(${c.r},${c.g},${c.b},${coreA * 0.4})`);
+        cg.addColorStop(1,   `rgba(${c.r},${c.g},${c.b},0)`);
+        ctx.fillStyle = cg;
+        ctx.fillRect(-coreR, -coreR, coreR * 2, coreR * 2);
         ctx.restore();
         ctx.globalCompositeOperation = 'source-over';
         break;
@@ -2693,44 +2772,76 @@ const BackgroundEngine = (() => {
 
       // ▮ Эквалайзер: столбики частот с плавным затуханием
       case 'spectrumBars': {
-        // Эмулируем 32 столбика — используем 3 band'а bands.bass/mid/high с интерполяцией
-        const n = 32;
-        const bars = st.bars;
+        // 48 баров с зеркальным отражением — современный спектроанализатор
+        const n = 48;
+        const bars  = st.bars;
+        const peaks = st.peaks || (st.peaks = new Array(n).fill(0));
+
         for (let i = 0; i < n; i++) {
-          // Распределяем по частотам: 0..10 = bass, 10..22 = mid, 22..32 = high
+          const u = i / (n - 1);                     // 0..1 — позиция по спектру
+          // Smooth-bend по частотам с приоритетом средних (купол)
           let target;
-          if (i < 10)       target = (bands.bass || 0) * (1 - i / 10) + (bands.mid || 0) * (i / 10);
-          else if (i < 22)  target = (bands.mid  || 0) * (1 - (i - 10) / 12) + (bands.high || 0) * ((i - 10) / 12);
-          else              target = (bands.high || 0);
-          // Низкочастотный фильтр: разная реакция вверх и вниз (быстро вверх, медленно вниз)
+          if (u < 0.35)      target = (bands.bass || 0) * (1 - u / 0.35) + (bands.mid || 0) * (u / 0.35);
+          else if (u < 0.75) target = (bands.mid  || 0) * (1 - (u - 0.35) / 0.40) + (bands.high || 0) * ((u - 0.35) / 0.40);
+          else               target = (bands.high || 0);
+          target *= 0.65 + 0.35 * Math.sin(u * Math.PI);   // огибающая-купол
           const cur = bars[i];
-          if (target > cur) bars[i] = cur * 0.45 + target * 0.55;  // быстро поднимаем
-          else              bars[i] = cur * 0.92 + target * 0.08;  // медленно опускаем
+          if (target > cur) bars[i] = cur * 0.40 + target * 0.60;
+          else              bars[i] = cur * 0.90 + target * 0.10;
+          if (bars[i] > peaks[i]) peaks[i] = bars[i];
+          else                    peaks[i] = Math.max(bars[i], peaks[i] - dts * 0.45);
         }
 
+        // Привязка к низу: если y дефолтный (50) — рисуем у нижней кромки
+        const yPct = (ov.y == null || ov.y === 50) ? 88 : ov.y;
         const widthPx = (ov.width / 100) * cw;
         const startX  = (ov.x / 100) * cw - widthPx / 2;
-        const bottomY = (ov.y / 100) * ch;
-        const maxH    = ch * 0.20 * (0.5 + intensity * 0.7);
-        const barW    = widthPx / n * 0.75;
-        const gap     = widthPx / n * 0.25;
+        const baseY   = (yPct / 100) * ch;
+        const maxH    = ch * 0.18 * (0.5 + intensity * 0.7);
+        const slot    = widthPx / n;
+        const barW    = slot * 0.55;
+        const corner  = Math.min(barW * 0.5, 6);
 
         ctx.save();
-        ctx.shadowColor = `rgba(${c.r},${c.g},${c.b},0.85)`;
-        ctx.shadowBlur  = 10 + intensity * 8;
+        ctx.globalCompositeOperation = 'lighter';
         for (let i = 0; i < n; i++) {
           const h = bars[i] * maxH;
-          if (h < 1) continue;
-          const x = startX + i * (barW + gap);
-          // Градиент столбика: ярче внизу, мягче вверху
-          const g = ctx.createLinearGradient(0, bottomY - h, 0, bottomY);
-          g.addColorStop(0, `rgba(${c.r},${c.g},${c.b},${0.4 + intensity * 0.3})`);
-          g.addColorStop(1, `rgba(${c.r},${c.g},${c.b},${0.85 + intensity * 0.15})`);
-          ctx.fillStyle = g;
-          ctx.fillRect(x, bottomY - h, barW, h);
+          if (h < 0.5) continue;
+          const x = startX + i * slot + (slot - barW) / 2;
+          const u = i / (n - 1);
+          const tint = 0.85 + Math.sin(u * Math.PI * 1.2) * 0.15;
+
+          // Основной бар вверх от baseY с скруглёнными верхушками
+          const gUp = ctx.createLinearGradient(0, baseY - h, 0, baseY);
+          gUp.addColorStop(0,   `rgba(${c.r},${c.g},${c.b},0)`);
+          gUp.addColorStop(0.3, `rgba(${c.r},${c.g},${c.b},${(0.45 + intensity * 0.25) * tint})`);
+          gUp.addColorStop(1,   `rgba(${c.r},${c.g},${c.b},${0.95 * tint})`);
+          ctx.fillStyle = gUp;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(x, baseY - h, barW, h, [corner, corner, 0, 0]);
+          else               ctx.rect(x, baseY - h, barW, h);
+          ctx.fill();
+
+          // Зеркальное отражение вниз — затухает
+          const hMirror = h * 0.5;
+          const gDn = ctx.createLinearGradient(0, baseY, 0, baseY + hMirror);
+          gDn.addColorStop(0, `rgba(${c.r},${c.g},${c.b},${0.55 * tint})`);
+          gDn.addColorStop(1, `rgba(${c.r},${c.g},${c.b},0)`);
+          ctx.fillStyle = gDn;
+          ctx.beginPath();
+          if (ctx.roundRect) ctx.roundRect(x, baseY, barW, hMirror, [0, 0, corner, corner]);
+          else               ctx.rect(x, baseY, barW, hMirror);
+          ctx.fill();
+
+          // Peak-hold линия
+          const pH = peaks[i] * maxH;
+          if (pH > h + 2) {
+            ctx.fillStyle = `rgba(255,255,255,${0.35 + intensity * 0.25})`;
+            ctx.fillRect(x, baseY - pH - 2, barW, 2);
+          }
         }
-        ctx.shadowBlur = 0;
         ctx.restore();
+        ctx.globalCompositeOperation = 'source-over';
         break;
       }
 
@@ -2905,6 +3016,18 @@ const BackgroundEngine = (() => {
         if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
       }
       c.closePath();
+    }
+
+    // Film grain — мелкий шум поверх композиции, лёгкая зернистость
+    function grain(c, x, y, w, h, opacity, color) {
+      c.save();
+      c.globalAlpha = opacity;
+      c.fillStyle = color || '#ffffff';
+      const n = Math.max(40, Math.floor(w * h / 6500));
+      for (let i = 0; i < n; i++) {
+        c.fillRect(x + Math.random() * w, y + Math.random() * h, 1.4, 1.4);
+      }
+      c.restore();
     }
 
     // Brush stroke — a curved variable-width band, like a thick ink mark
@@ -3987,6 +4110,506 @@ const BackgroundEngine = (() => {
       },
 
       // ══════════════════════════════════════════════════════════════
+      // EDITORIAL — Aston-Machan-стиль: тонкая 3×3 сетка с гэпами,
+      // wordmark+CJK-якоря, вертикальный credit, цитата-нижняя
+      // Все тексты редактируемые через ov.frameSlots
+      // ══════════════════════════════════════════════════════════════
+      editorial(c, x, y, w, h, th, det, bands, t, color, slots) {
+        const ACC = color;
+        const S = slots || {};
+        const H = h;                   // привязка типографики к высоте — стабильно при любом аспекте
+        const bs = bands.bass || 0, md = bands.mid || 0;
+        const _t1 = S.t1 ?? 'ASTON MACHAN';
+        const _t2 = S.t2 ?? 'アストンマーチャン';
+        const _c1 = S.c1 ?? '真快';
+        const _c2 = S.c2 ?? '弓車';
+        const _cr = S.cr ?? 'Sprinters Stakes (2007) | Fillies Revue (2007)';
+        const _q  = S.q  ?? '"Immortal Machan"';
+        const _h  = S.h  ?? '@Gab_Obj_279';
+        // Внешняя тонкая рамка
+        c.save();
+        c.strokeStyle = ACC; c.lineWidth = th * 0.6; c.globalAlpha = 0.85 + bs * 0.15;
+        c.strokeRect(x, y, w, h);
+        c.restore();
+        // 3×3 сетка с центральным гэпом
+        c.save();
+        c.strokeStyle = ACC; c.lineWidth = th * 0.45;
+        c.globalAlpha = 0.50 + md * 0.20;
+        const gap = H * 0.022;
+        [w/3, 2*w/3].forEach(vx => {
+          c.beginPath();
+          c.moveTo(x+vx, y);                c.lineTo(x+vx, y + h/3 - gap);
+          c.moveTo(x+vx, y + h/3 + gap);    c.lineTo(x+vx, y + 2*h/3 - gap);
+          c.moveTo(x+vx, y + 2*h/3 + gap);  c.lineTo(x+vx, y + h);
+          c.stroke();
+        });
+        [h/3, 2*h/3].forEach(vy => {
+          c.beginPath();
+          c.moveTo(x, y+vy);                c.lineTo(x + w/3 - gap, y+vy);
+          c.moveTo(x + w/3 + gap, y+vy);    c.lineTo(x + 2*w/3 - gap, y+vy);
+          c.moveTo(x + 2*w/3 + gap, y+vy);  c.lineTo(x + w, y+vy);
+          c.stroke();
+        });
+        c.restore();
+        // TL: крупный wordmark + accent underline + sub
+        c.save();
+        c.fillStyle = ACC; c.textAlign = 'left'; c.textBaseline = 'top';
+        c.font = `900 ${H*0.082}px "Bebas Neue", "Inter", sans-serif`;
+        c.fillText(_t1, x + H*0.045, y + H*0.045);
+        // Accent underline (увеличен)
+        const ulW = Math.max(c.measureText(_t1).width * 1.12, H*0.25);
+        const ulX = x + H*0.045, ulY = y + H*0.045 + H*0.090;
+        const grad = c.createLinearGradient(ulX, 0, ulX + ulW, 0);
+        grad.addColorStop(0, ACC); grad.addColorStop(1, hexRGBA(ACC, 0));
+        c.fillStyle = grad;
+        c.fillRect(ulX, ulY, ulW, Math.max(3.5, th*0.85));
+        // JP subtitle крупнее
+        c.fillStyle = ACC;
+        c.font = `500 ${H*0.058}px "Noto Sans JP", "Inter", sans-serif`;
+        c.fillText(_t2, x + H*0.045, y + H*0.155);
+        c.restore();
+        // Правый край: МАССИВНЫЕ CJK глифы
+        c.save();
+        c.fillStyle = ACC; c.textAlign = 'center'; c.textBaseline = 'middle';
+        const cjkSz = H * 0.32;
+        c.font = `900 ${cjkSz}px "Noto Sans JP", "Inter", sans-serif`;
+        const c1chars = (_c1 || '').slice(0, 2).split('');
+        const c2chars = (_c2 || '').slice(0, 2).split('');
+        const rx1 = x + w - H*0.13, rx2 = x + w - H*0.39;
+        const cjkY = y + h * 0.42;
+        // Лёгкая drop-shadow для глифов
+        c.shadowColor = hexRGBA(ACC, 0.25);
+        c.shadowBlur  = H * 0.025;
+        if (c1chars[0]) c.fillText(c1chars[0], rx1, cjkY);
+        if (c1chars[1]) c.fillText(c1chars[1], rx1, cjkY + cjkSz * 1.02);
+        if (c2chars[0]) c.fillText(c2chars[0], rx2, cjkY);
+        if (c2chars[1]) c.fillText(c2chars[1], rx2, cjkY + cjkSz * 1.02);
+        c.shadowBlur = 0;
+        c.restore();
+        // Вертикальный credit справа (крупнее)
+        c.save();
+        c.fillStyle = ACC;
+        c.font = `500 ${H*0.034}px "Inter", sans-serif`;
+        c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.translate(x + w - H*0.040, y + h*0.50);
+        c.rotate(Math.PI/2);
+        c.fillText(_cr, 0, 0);
+        c.restore();
+        c.save();
+        c.strokeStyle = ACC; c.lineWidth = th*0.55; c.globalAlpha = 0.65;
+        c.beginPath();
+        c.moveTo(x + w - H*0.052, y + h*0.66);
+        c.lineTo(x + w - H*0.052, y + h*0.84);
+        c.stroke();
+        c.restore();
+        // BL: italic quote + handle + underline (всё крупнее)
+        c.save();
+        c.fillStyle = ACC; c.textAlign = 'left'; c.textBaseline = 'bottom';
+        c.font = `italic 700 ${H*0.062}px "Playfair Display", "Inter", serif`;
+        c.fillText(_q, x + H*0.045, y + h - H*0.105);
+        c.font = `600 ${H*0.040}px "Inter", sans-serif`;
+        c.fillText(_h, x + H*0.045, y + h - H*0.045);
+        c.strokeStyle = ACC; c.lineWidth = th*0.75;
+        const hW = Math.max(c.measureText(_h).width * 0.85, H*0.13);
+        c.beginPath();
+        c.moveTo(x + H*0.045, y + h - H*0.030);
+        c.lineTo(x + H*0.045 + hW, y + h - H*0.030);
+        c.stroke();
+        c.restore();
+        // Лёгкий grain поверх композиции
+        grain(c, x, y, w, h, 0.040, ACC);
+      },
+
+      // ══════════════════════════════════════════════════════════════
+      // MEGATYPE — LOVE/CHANGLI-стиль: гигантский title с хроматическими
+      // ghost-копиями вниз с убывающей прозрачностью, угловые лейблы,
+      // искры. Все тексты редактируемые.
+      // ══════════════════════════════════════════════════════════════
+      megatype(c, x, y, w, h, th, det, bands, t, color, slots) {
+        const ACC = color;
+        const S = slots || {};
+        const H = h;
+        const bs = bands.bass || 0;
+        const _title    = S.title   ?? 'LOVE';
+        const _eyebrow  = S.eyebrow ?? 'T R O U B L E M A K E R';
+        const _sub      = S.sub     ?? 'YOU';
+        const _sub2     = S.sub2    ?? 'EVERY TIME I SEE YOU';
+        const _tl1      = S.tl1     ?? 'SHOULD';
+        const _tl2      = S.tl2     ?? 'I HAVE TO';
+        const _tr1      = S.tr1     ?? 'CHANGLI';
+        const _tr2      = S.tr2     ?? 'JINZHOU MAGISTRATE';
+        const _brand1   = S.brand1  ?? 'Ricole';
+        const _brand2   = S.brand2  ?? 'Project';
+        const titleY = y + h * 0.42;
+        const titleSz = H * 0.40;
+        // ── Backdrop-фигура: большая абстрактная V/треугольник позади title ──
+        c.save();
+        c.fillStyle = hexRGBA(ACC, 0.55 + bs * 0.20);
+        c.beginPath();
+        c.moveTo(x + w * 0.50, y + h * 0.06);
+        c.lineTo(x + w * 0.78, y + h * 0.55);
+        c.lineTo(x + w * 0.22, y + h * 0.55);
+        c.closePath();
+        c.fill();
+        c.restore();
+        // ── Ghost-стек title (6 копий, descend далеко) ──
+        c.save();
+        c.font = `900 ${titleSz}px "Bebas Neue", "Inter", sans-serif`;
+        c.textAlign = 'center'; c.textBaseline = 'middle';
+        const ghosts = 6;
+        for (let i = ghosts; i >= 1; i--) {
+          const yy = titleY + i * titleSz * 0.54;
+          const a  = (1 - i / (ghosts + 1)) * 0.55;
+          c.fillStyle = `rgba(255,255,255,${a})`;
+          c.fillText(_title, x + w/2, yy);
+        }
+        // Главный title с большой shadow-glow
+        c.shadowColor = hexRGBA(ACC, 0.60 + bs * 0.4);
+        c.shadowBlur = 40 + bs * 50;
+        c.fillStyle = '#ffffff';
+        c.fillText(_title, x + w/2, titleY);
+        c.shadowBlur = 0;
+        c.restore();
+        // Eyebrow крупнее
+        c.save();
+        c.fillStyle = '#ffffff';
+        c.font = `600 ${H*0.040}px "Inter", sans-serif`;
+        c.textAlign = 'center'; c.textBaseline = 'middle';
+        c.globalAlpha = 0.92;
+        c.fillText(_eyebrow, x + w/2, titleY - titleSz*0.60);
+        c.restore();
+        // Sub "YOU" огромный
+        c.save();
+        c.fillStyle = '#ffffff';
+        c.font = `900 ${H*0.130}px "Bebas Neue", "Inter", sans-serif`;
+        c.textAlign = 'center'; c.textBaseline = 'top';
+        c.fillText(_sub, x + w/2, titleY + ghosts * titleSz * 0.56);
+        c.font = `600 ${H*0.034}px "Inter", sans-serif`;
+        c.globalAlpha = 0.90;
+        c.fillText(_sub2, x + w/2, titleY + ghosts * titleSz * 0.56 + H*0.155);
+        c.restore();
+        // TL stamp ОГРОМНОЕ (с ghost)
+        c.save();
+        c.fillStyle = '#ffffff'; c.textAlign = 'left'; c.textBaseline = 'top';
+        c.font = `900 ${H*0.105}px "Bebas Neue", "Inter", sans-serif`;
+        c.fillText(_tl1,  x + H*0.050, y + H*0.050);
+        c.globalAlpha = 0.40;
+        c.fillText(_tl1,  x + H*0.050 + H*0.018, y + H*0.050 + H*0.058);
+        c.globalAlpha = 1;
+        c.font = `700 ${H*0.046}px "Inter", sans-serif`;
+        c.fillText(_tl2, x + H*0.050, y + H*0.21);
+        c.restore();
+        // TR stamp
+        c.save();
+        c.fillStyle = '#ffffff'; c.textAlign = 'right'; c.textBaseline = 'top';
+        c.font = `900 ${H*0.105}px "Bebas Neue", "Inter", sans-serif`;
+        c.fillText(_tr1,  x + w - H*0.050, y + H*0.050);
+        c.font = `600 ${H*0.034}px "Inter", sans-serif`;
+        c.globalAlpha = 0.85;
+        c.fillText(_tr2,  x + w - H*0.050, y + H*0.175);
+        c.restore();
+        // Больше искр (8 шт.) с пульсацией по басу
+        const stars = [[0.42,0.06],[0.58,0.08],[0.50,0.04],[0.88,0.13],[0.13,0.27],[0.30,0.10],[0.72,0.20],[0.05,0.45]];
+        c.save();
+        c.fillStyle = '#ffffff';
+        stars.forEach(([px, py]) => {
+          const cx = x + w * px, cy = y + h * py;
+          const r = H * (0.025 + bs * 0.012);
+          c.beginPath();
+          c.moveTo(cx, cy - r); c.lineTo(cx + r*0.25, cy - r*0.25); c.lineTo(cx + r, cy);
+          c.lineTo(cx + r*0.25, cy + r*0.25); c.lineTo(cx, cy + r); c.lineTo(cx - r*0.25, cy + r*0.25);
+          c.lineTo(cx - r, cy); c.lineTo(cx - r*0.25, cy - r*0.25); c.closePath();
+          c.fill();
+        });
+        c.restore();
+        // Нижний brand (крупнее)
+        const brandY = y + h - H*0.085;
+        c.save();
+        c.fillStyle = '#ffffff'; c.strokeStyle = '#ffffff';
+        c.lineWidth = th * 0.6;
+        const bxX = x + w/2 - H*0.16, bxY = brandY - H*0.040;
+        c.strokeRect(bxX, bxY, H*0.055, H*0.055);
+        c.font = `700 ${H*0.034}px "Inter", sans-serif`;
+        c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.fillText(_brand1, bxX + H*0.072, brandY - H*0.014);
+        c.fillText(_brand2, bxX + H*0.072, brandY + H*0.018);
+        c.restore();
+        // Лёгкий grain
+        grain(c, x, y, w, h, 0.035, '#ffffff');
+      },
+
+      // ══════════════════════════════════════════════════════════════
+      // ALBUM — NIRVANA-стиль: огромная hollow stencil + 3-кол. footer
+      // Все тексты редактируемые
+      // ══════════════════════════════════════════════════════════════
+      album(c, x, y, w, h, th, det, bands, t, color, slots) {
+        const ACC = color;
+        const S = slots || {};
+        const H = h;
+        const bs = bands.bass || 0;
+        const _title = S.title ?? 'RICOLE';
+        const _a1    = S.a1    ?? 'PEACE';
+        const _a2    = S.a2    ?? 'BEYOND';
+        const _a3    = S.a3    ?? 'DESIRE';
+        const _r1    = S.r1    ?? 'RESTRICTED';
+        const _r2    = S.r2    ?? '— —  RICOLE —  —';
+        const words  = [S.w1??'TRUE', S.w2??'LIES', S.w3??'PEACE', S.w4??'IN', S.w5??'STILLNESS', S.w6??'THE'];
+        // ── Геометрия footer-band (нижняя 40% карточки) ──
+        const FOOT_H  = h * 0.40;
+        const footTop = y + h - FOOT_H;
+        const PAD     = H * 0.040;
+        const CREAM   = '#f4eedd';
+        // ── Подложки ──
+        c.save();
+        c.fillStyle = ACC;
+        // Тонкий верхний бар (5% h)
+        c.fillRect(x, y, w, H * 0.040);
+        // Основная footer-band
+        c.fillRect(x, footTop, w, FOOT_H);
+        // Боковые тонкие колонны (визуальная "плёнка" сбоку)
+        c.fillRect(x, y, H * 0.025, h);
+        c.fillRect(x + w - H * 0.025, y, H * 0.025, h);
+        c.restore();
+        // ── Верхний strip-info: edition / serial / timestamp ──
+        c.save();
+        c.fillStyle = CREAM;
+        c.font = `700 ${H * 0.020}px "Space Mono", monospace`;
+        c.textBaseline = 'middle';
+        const topY = y + H * 0.020;
+        c.textAlign = 'left';
+        c.fillText('R · 01 / ' + new Date().getFullYear(), x + H * 0.045, topY);
+        c.textAlign = 'center';
+        c.fillText('— RICOLE PROJECT —', x + w/2, topY);
+        c.textAlign = 'right';
+        c.fillText('SIDE A · STEREO · 33⅓', x + w - H * 0.045, topY);
+        c.restore();
+        // ── HOLLOW STENCIL TITLE в самом верху footer-band ──
+        // Sизе — авто-фит по ширине, чтобы НЕ вылезал и НЕ был мелким
+        c.save();
+        c.textAlign = 'center';
+        c.textBaseline = 'top';
+        c.strokeStyle = CREAM;
+        c.lineWidth   = Math.max(3.5, th * 1.5);
+        c.lineJoin    = 'round';
+        // Пробуем большой шрифт, ужимаем если не влезает
+        let titleSize = FOOT_H * 0.55;
+        c.font = `900 ${titleSize}px "Bebas Neue", "Impact", sans-serif`;
+        const maxTitleW = w - PAD * 2;
+        const measured = c.measureText(_title).width;
+        if (measured > maxTitleW) {
+          titleSize *= (maxTitleW / measured);
+          c.font = `900 ${titleSize}px "Bebas Neue", "Impact", sans-serif`;
+        }
+        c.shadowColor = 'rgba(0,0,0,0.30)';
+        c.shadowBlur  = 18 + bs * 22;
+        c.strokeText(_title, x + w/2, footTop + H * 0.010);
+        c.shadowBlur = 0;
+        c.restore();
+        // ── 3 якоря СРАЗУ под title ──
+        c.save();
+        c.fillStyle = CREAM;
+        c.font = `900 ${H * 0.038}px "Bebas Neue", "Inter", sans-serif`;
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        const anchorY = footTop + FOOT_H * 0.50;
+        c.fillText(_a1, x + w * 0.18, anchorY);
+        c.fillText(_a2, x + w * 0.50, anchorY);
+        c.fillText(_a3, x + w * 0.82, anchorY);
+        // тонкая разделительная линия над якорями
+        c.globalAlpha = 0.55;
+        c.strokeStyle = CREAM;
+        c.lineWidth = Math.max(1, th * 0.4);
+        c.beginPath();
+        c.moveTo(x + PAD, anchorY - H * 0.030);
+        c.lineTo(x + w - PAD, anchorY - H * 0.030);
+        c.stroke();
+        c.restore();
+        // ── 4 колонки footer: 3 mock-body + 1 waveform-в-рамке ──
+        c.save();
+        const colsY  = footTop + FOOT_H * 0.62;
+        const colsH  = FOOT_H * 0.22;
+        const usableW = w - PAD * 2;
+        const colGap = H * 0.018;
+        const colW   = (usableW - colGap * 3) / 4;
+        const colXs  = [
+          x + PAD,
+          x + PAD + colW + colGap,
+          x + PAD + 2 * (colW + colGap),
+          x + PAD + 3 * (colW + colGap),
+        ];
+        c.fillStyle = CREAM;
+        for (let col = 0; col < 3; col++) {
+          const lines = 7;
+          for (let li = 0; li < lines; li++) {
+            const lineW = colW * (0.55 + ((col * 7 + li * 11) % 17) / 30);
+            c.globalAlpha = 0.65 + ((col + li) % 2) * 0.22;
+            c.fillRect(colXs[col], colsY + li * (colsH / lines), lineW, Math.max(1.2, th * 0.42));
+          }
+        }
+        c.globalAlpha = 1;
+        // 4-я колонка: рамка + waveform
+        c.strokeStyle = CREAM;
+        c.lineWidth = Math.max(1.2, th * 0.5);
+        c.strokeRect(colXs[3], colsY, colW, colsH);
+        c.beginPath();
+        for (let i = 0; i <= 60; i++) {
+          const xn = i / 60;
+          const px = colXs[3] + xn * colW;
+          const n = Math.sin(xn * 9 + t * 0.6) * 0.4 + Math.sin(xn * 17 - t * 0.3) * 0.25;
+          const py = colsY + colsH * 0.5 + n * colsH * 0.30;
+          if (i === 0) c.moveTo(px, py); else c.lineTo(px, py);
+        }
+        c.stroke();
+        c.restore();
+        // ── BL R-rating stamp ──
+        c.save();
+        c.fillStyle = CREAM;
+        c.strokeStyle = CREAM;
+        c.lineWidth = Math.max(1.4, th * 0.6);
+        const stSz = FOOT_H * 0.12;
+        const stX  = x + PAD;
+        const stY  = y + h - PAD - stSz;
+        c.strokeRect(stX, stY, stSz, stSz);
+        c.font = `900 ${stSz * 0.78}px "Bebas Neue", "Impact", sans-serif`;
+        c.textAlign = 'center';
+        c.textBaseline = 'middle';
+        c.fillText('R', stX + stSz / 2, stY + stSz / 2);
+        c.font = `700 ${H * 0.016}px "Space Mono", monospace`;
+        c.textAlign = 'left';
+        c.fillText(_r1, stX + stSz + H * 0.015, stY + stSz * 0.32);
+        c.fillText(_r2, stX + stSz + H * 0.015, stY + stSz * 0.72);
+        c.restore();
+        // ── BR баркод ──
+        c.save();
+        c.fillStyle = CREAM;
+        const barCnt = 28;
+        const barW   = H * 0.0070;
+        const barTotalW = barCnt * barW;
+        const barX = x + w - PAD - barTotalW;
+        const barY = y + h - PAD - FOOT_H * 0.12;
+        for (let i = 0; i < barCnt; i++) {
+          const seed = (i * 13 + 7) % 17;
+          const ww = seed < 3 ? th * 2.0 : seed < 9 ? th * 0.7 : th * 0.35;
+          c.fillRect(barX + i * barW, barY, ww, FOOT_H * 0.12);
+        }
+        // мелкая подпись под баркодом
+        c.font = `400 ${H * 0.012}px "Space Mono", monospace`;
+        c.textAlign = 'right';
+        c.textBaseline = 'top';
+        c.fillText('0 · 271828 · 18284', x + w - PAD, barY + FOOT_H * 0.12 + H * 0.005);
+        c.restore();
+        // Лёгкий paper grain ТОЛЬКО на footer-band (не на image-зоне)
+        grain(c, x, footTop, w, FOOT_H, 0.035, CREAM);
+      },
+
+      // ══════════════════════════════════════════════════════════════
+      // PATHTYPE — FOCUS-стиль: текст по дуге огибает форму, FOCUS-анкор
+      // призмо-блик. Все тексты редактируемые.
+      // ══════════════════════════════════════════════════════════════
+      pathtype(c, x, y, w, h, th, det, bands, t, color, slots) {
+        const ACC = color;
+        const S = slots || {};
+        const H = h;
+        const hi = bands.high || 0;
+        const _arc1   = S.arc1    ?? 'SMOKE A CIGARETTE. YOU CAN GET LITTLE BOYS TO LIKE YOU. ';
+        const _arc2   = S.arc2    ?? 'IF YOU LOOK PRETTY INTO THE CAMERA IN AN EPIC POSE, BOLD CLOTHES, COOL GLASSES. ';
+        const _focus  = S.focus   ?? 'FOCUS';
+        const _air    = S.air     ?? 'AIR';
+        const _airsub = S.airsub  ?? 'CHAPMAN CHERRY';
+        const _logo   = S.logo    ?? 'E.O.F.';
+        const _logosub= S.logosub ?? 'EMBODIMENT OF FANTASY';
+        const drawArcText = (text, cx, cy, r, a0, a1, font, color, alpha) => {
+          c.save();
+          c.fillStyle = color;
+          c.globalAlpha = alpha;
+          c.font = font;
+          c.textBaseline = 'middle';
+          c.textAlign = 'center';
+          const chars = (text || '').split('');
+          const widths = chars.map(ch => c.measureText(ch).width);
+          const total = widths.reduce((a, b) => a + b, 0) || 1;
+          const span = a1 - a0;
+          let off = 0;
+          for (let i = 0; i < chars.length; i++) {
+            const ca = a0 + (off + widths[i] / 2) / total * span;
+            c.save();
+            c.translate(cx + r * Math.cos(ca), cy + r * Math.sin(ca));
+            c.rotate(ca + Math.PI / 2);
+            c.fillText(chars[i], 0, 0);
+            c.restore();
+            off += widths[i];
+          }
+          c.restore();
+        };
+        // Текст по верхней дуге (крупнее)
+        const arcCx = x + w * 0.40, arcCy = y + h * 0.45;
+        drawArcText(_arc1, arcCx, arcCy, H * 0.52,
+                    Math.PI * 1.05, Math.PI * 1.95,
+                    `700 ${H*0.054}px "Inter", sans-serif`, '#0d0d0d', 0.95);
+        // Вторая дуга
+        drawArcText(_arc2, arcCx, arcCy, H * 0.76,
+                    Math.PI * 1.15, Math.PI * 1.85,
+                    `500 ${H*0.034}px "Inter", sans-serif`, '#0d0d0d', 0.42);
+        // ОГРОМНЫЙ FOCUS-якорь TR
+        c.save();
+        c.fillStyle = '#0d0d0d';
+        c.font = `900 ${H*0.140}px "Inter", "Helvetica Neue", sans-serif`;
+        c.textAlign = 'right'; c.textBaseline = 'middle';
+        c.fillText(_focus, x + w - H*0.08, y + h * 0.26);
+        c.restore();
+        // Левый вертикальный AIR (крупнее)
+        c.save();
+        c.fillStyle = '#f4eedd';
+        c.translate(x + H*0.055, y + h * 0.60);
+        c.font = `900 ${H*0.090}px "Inter", "Helvetica Neue", sans-serif`;
+        c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.fillText(_air, 0, 0);
+        c.font = `500 ${H*0.028}px "Space Mono", monospace`;
+        c.fillText(_airsub, 0, H*0.072);
+        c.restore();
+        // Призмо-блик (rainbow radial) — гораздо крупнее
+        c.save();
+        const prX = x + w * 0.45, prY = y + h * 0.88;
+        const prR = H * 0.48;
+        const pg = c.createRadialGradient(prX, prY, 0, prX, prY, prR);
+        pg.addColorStop(0,    `rgba(255,80,80,${0.65 + hi*0.25})`);
+        pg.addColorStop(0.25, `rgba(255,220,40,${0.55 + hi*0.20})`);
+        pg.addColorStop(0.50, `rgba(60,200,80,${0.48 + hi*0.20})`);
+        pg.addColorStop(0.75, `rgba(60,140,255,${0.40 + hi*0.15})`);
+        pg.addColorStop(1,    `rgba(140,60,200,0)`);
+        c.globalCompositeOperation = 'screen';
+        c.fillStyle = pg;
+        c.fillRect(prX - prR, prY - prR, prR*2, prR*2);
+        c.restore();
+        // Дополнительный призмо-блик правее, помельче
+        c.save();
+        const prX2 = x + w * 0.75, prY2 = y + h * 0.92;
+        const prR2 = H * 0.22;
+        const pg2 = c.createRadialGradient(prX2, prY2, 0, prX2, prY2, prR2);
+        pg2.addColorStop(0,    `rgba(255,150,60,${0.45 + hi*0.20})`);
+        pg2.addColorStop(0.50, `rgba(180,80,255,${0.35 + hi*0.15})`);
+        pg2.addColorStop(1,    `rgba(0,140,255,0)`);
+        c.globalCompositeOperation = 'screen';
+        c.fillStyle = pg2;
+        c.fillRect(prX2 - prR2, prY2 - prR2, prR2*2, prR2*2);
+        c.restore();
+        // BL мини-лого (крупнее)
+        c.save();
+        c.fillStyle = '#0d0d0d'; c.strokeStyle = '#0d0d0d';
+        c.lineWidth = th * 0.6;
+        const lx = x + H*0.050, ly = y + h - H*0.078;
+        c.strokeRect(lx, ly - H*0.048, H*0.048, H*0.048);
+        c.font = `700 ${H*0.028}px "Space Mono", monospace`;
+        c.textAlign = 'left'; c.textBaseline = 'middle';
+        c.fillText(_logo, lx + H*0.060, ly - H*0.024);
+        c.font = `500 ${H*0.016}px "Space Mono", monospace`;
+        c.fillText(_logosub, lx, ly + H*0.014);
+        c.restore();
+        // Тонкий grain
+        grain(c, x, y, w, h, 0.030, '#000');
+      },
+
+      // ══════════════════════════════════════════════════════════════
       // 9. TAPE — 4 полоски washi-tape по углам, под наклоном
       // ══════════════════════════════════════════════════════════════
       tape(c, x, y, w, h, th, det, bands, t, color) {
@@ -4142,7 +4765,8 @@ const BackgroundEngine = (() => {
       ctx.fillStyle   = finalColor;
       ctx.lineWidth   = th;
 
-      drawFn(ctx, mg, mg, cw - mg * 2, ch - mg * 2, th, det, safeBands, safeT, finalColor);
+      const slots = ov.frameSlots || {};
+      drawFn(ctx, mg, mg, cw - mg * 2, ch - mg * 2, th, det, safeBands, safeT, finalColor, slots);
 
       // Сбрасываем dash после draw
       if (amode === 'march') ctx.setLineDash([]);
@@ -4153,6 +4777,11 @@ const BackgroundEngine = (() => {
     const STYLES = [
       // Без рамки — для голого текста на фоне
       { id:'none',       label:'БЕЗ РАМКИ',  icon:'∅', desc:'только текстовые блоки' },
+      // Постер-композиции (digital poster layouts)
+      { id:'editorial',  label:'EDITORIAL',  icon:'⊞', desc:'3×3 сетка + CJK-якоря + цитата' },
+      { id:'megatype',   label:'MEGATYPE',   icon:'▤', desc:'хроматический штабель title' },
+      { id:'album',      label:'ALBUM',      icon:'◉', desc:'hollow stencil + 3-кол. footer' },
+      { id:'pathtype',   label:'PATHTYPE',   icon:'⌒', desc:'текст по дуге + призмо-блик' },
       // Кинематографические / типографические
       { id:'letterbox',  label:'LETTERBOX',  icon:'▬', desc:'чистые кино-полосы 2.35:1' },
       { id:'filmStrip',  label:'FILMSTRIP',  icon:'▥', desc:'35мм плёнка с перфорацией' },
@@ -4169,7 +4798,55 @@ const BackgroundEngine = (() => {
       { id:'vhs',        label:'VHS',        icon:'▤', desc:'ретро-видео + хром.' },
     ];
 
-    return { draw, STYLES, LEGACY_MAP };
+    // ── Схема редактируемых текстовых слотов для постер-стилей ──
+    const FRAME_SLOTS_SCHEMA = {
+      editorial: [
+        { key:'t1', label:'Заголовок TL',     def:'ASTON MACHAN' },
+        { key:'t2', label:'Подзаголовок TL',  def:'アストンマーチャン' },
+        { key:'c1', label:'CJK столбец 1',    def:'真快' },
+        { key:'c2', label:'CJK столбец 2',    def:'弓車' },
+        { key:'cr', label:'Боковая подпись',  def:'Sprinters Stakes (2007) | Fillies Revue (2007)' },
+        { key:'q',  label:'Цитата BL',        def:'"Immortal Machan"' },
+        { key:'h',  label:'Handle BL',        def:'@Gab_Obj_279' },
+      ],
+      megatype: [
+        { key:'title',   label:'Главный title',    def:'LOVE' },
+        { key:'eyebrow', label:'Eyebrow выше',     def:'T R O U B L E M A K E R' },
+        { key:'sub',     label:'Под-слово',        def:'YOU' },
+        { key:'sub2',    label:'Tagline',          def:'EVERY TIME I SEE YOU' },
+        { key:'tl1',     label:'TL stamp · top',   def:'SHOULD' },
+        { key:'tl2',     label:'TL stamp · sub',   def:'I HAVE TO' },
+        { key:'tr1',     label:'TR stamp · top',   def:'CHANGLI' },
+        { key:'tr2',     label:'TR stamp · sub',   def:'JINZHOU MAGISTRATE' },
+        { key:'brand1',  label:'Brand line 1',     def:'Ricole' },
+        { key:'brand2',  label:'Brand line 2',     def:'Project' },
+      ],
+      album: [
+        { key:'title',  label:'Hollow stencil', def:'RICOLE' },
+        { key:'a1',     label:'Якорь · левый',  def:'PEACE' },
+        { key:'a2',     label:'Якорь · центр',  def:'BEYOND' },
+        { key:'a3',     label:'Якорь · правый', def:'DESIRE' },
+        { key:'r1',     label:'Stamp tag',      def:'RESTRICTED' },
+        { key:'r2',     label:'Stamp sub',      def:'— —  RICOLE —  —' },
+        { key:'w1',     label:'Слово 1',        def:'TRUE' },
+        { key:'w2',     label:'Слово 2',        def:'LIES' },
+        { key:'w3',     label:'Слово 3',        def:'PEACE' },
+        { key:'w4',     label:'Слово 4',        def:'IN' },
+        { key:'w5',     label:'Слово 5',        def:'STILLNESS' },
+        { key:'w6',     label:'Слово 6',        def:'THE' },
+      ],
+      pathtype: [
+        { key:'arc1',   label:'Текст по дуге 1', def:'SMOKE A CIGARETTE. YOU CAN GET LITTLE BOYS TO LIKE YOU. ' },
+        { key:'arc2',   label:'Текст по дуге 2', def:'IF YOU LOOK PRETTY INTO THE CAMERA IN AN EPIC POSE, BOLD CLOTHES, COOL GLASSES AND SMOKE A CIGARETTE. ' },
+        { key:'focus',  label:'Большой анкор',   def:'FOCUS' },
+        { key:'air',    label:'Левый вертик.',   def:'AIR' },
+        { key:'airsub', label:'Левый сабтайтл',  def:'CHAPMAN CHERRY' },
+        { key:'logo',   label:'BL мини-лого',    def:'E.O.F.' },
+        { key:'logosub',label:'BL сабтайтл',     def:'EMBODIMENT OF FANTASY' },
+      ],
+    };
+
+    return { draw, STYLES, LEGACY_MAP, FRAME_SLOTS_SCHEMA };
   })();
 
   function _drawOverlayItem(ctx, ov, cw, ch, bands, t, effectOverride = null, dt = 0.016) {
@@ -4256,6 +4933,23 @@ const BackgroundEngine = (() => {
         // Медленный органический пульс (не в такт музыке — похож на дыхание).
         scaleX = scaleY = 1 + Math.sin(t * 0.9) * amt * 0.12 + Math.sin(t * 2.3) * amt * 0.05;
         break;
+      case 'presence': {
+        /* ЗДЕСЬ НЕТ НИ ОДНОГО Math.sin(t), И ЭТО ГЛАВНОЕ СВОЙСТВО ЭФФЕКТА.
+           Любое слагаемое от одного лишь времени — это и есть «дыхание»:
+           цикл крутится сам по себе, в тишине и под удар одинаково, и кадр
+           читается зацикленной картинкой. Масштаб здесь — ЧИСТАЯ ФУНКЦИЯ
+           ЗВУКА: нет звука — фигура стоит абсолютно неподвижно, идёт бит —
+           она бьёт вместе с ним.
+
+           СМЕЩЕНИЯ И ПОВОРОТА ТОЖЕ НЕТ. Вырезанная фигура, которую кадр
+           режет по нижнему краю, при сдвиге вбок или наклоне «показывает»
+           свой срез: линия реза едет относительно границы кадра, и глаз
+           сразу читает плоскую картинку, которую таскают по экрану. */
+        const kick = Math.max(0, bands.bass - 0.22);      // удар на бит
+        const body = bands.mid * 0.35 + bands.overall * 0.25;  // тело микса
+        scaleX = scaleY = 1 + (kick * 0.55 + body * 0.20) * amt;
+        break;
+      }
       case 'glitch': {
         // Цифровой сбой: резкие случайные смещения на пиках баса.
         const g = bands.bass > 0.45 ? bands.bass : 0;
@@ -4405,11 +5099,16 @@ const BackgroundEngine = (() => {
     }
     
     // Лямбда рисования: off — дополнительное смещение для scroll-wrap дубликата
+    // Зеркалим спрайт по горизонтали: персонаж должен «смотреть» в кадр,
+    // а не за край — сторона зависит от того, где он стоит (см. AutoDirector).
+    const flip = ov.flipX ? -1 : 1;
+
     const drawAt = (addX, addY) => {
-      if (effect === 'spin' || rotation !== 0) {
+      if (effect === 'spin' || rotation !== 0 || flip < 0) {
         ctx.save();
         ctx.translate(baseX + offX + addX, baseY + offY + addY);
         ctx.rotate(rotation);
+        if (flip < 0) ctx.scale(-1, 1);
         ctx.drawImage(ov.img, -drawW / 2, -drawH / 2, drawW, drawH);
         if (ov.strokeEnabled && ov.strokeColor && ov.strokeWidth > 0) {
           ctx.shadowColor = 'transparent';
@@ -4442,6 +5141,62 @@ const BackgroundEngine = (() => {
     // (бесшовная прокрутка — когда одна копия уходит за край, другая появляется).
     if (scrollDupeDx !== 0 || scrollDupeDy !== 0) {
       drawAt(scrollDupeDx, scrollDupeDy);
+    }
+
+    /* ── ВПИСЫВАНИЕ ФИГУРЫ В СЦЕНУ ──────────────────────────
+       Вырезанный PNG, положенный поверх фона, читается как наклейка: у
+       него своя цветовая температура и прямая граница кадрирования. В
+       композитинге это лечат двумя вещами, и обе здесь есть:
+
+         feather — размывание края маской: убивает прямой срез картинки,
+                   фигура перестаёт быть прямоугольником;
+         tint    — подмешивание цвета сцены в саму фигуру: она начинает
+                   жить в том же свете, что и фон.
+
+       Рисуем по альфе самой картинки (source-atop / destination-in),
+       поэтому работает и с любым силуэтом. Холст здесь временный и
+       содержит только этот объект — за его пределы эффект не уходит. */
+    const feather = +ov.feather || 0;      // 0..1, доля от размера фигуры
+    const tintAmt = +ov.tintAmt || 0;      // 0..1
+    if (feather > 0.001 || (tintAmt > 0.001 && ov.tint)) {
+      const bx = baseX + offX - drawW / 2;
+      const by = baseY + offY - drawH / 2;
+
+      if (tintAmt > 0.001 && ov.tint) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-atop';
+        ctx.globalAlpha = Math.min(1, tintAmt);
+        ctx.fillStyle = ov.tint;
+        ctx.fillRect(bx - drawW, by - drawH, drawW * 3, drawH * 3);
+        ctx.restore();
+      }
+
+      if (feather > 0.001) {
+        const fx2 = Math.max(2, drawW * feather * 0.5);
+        const fy2 = Math.max(2, drawH * feather * 0.5);
+        ctx.save();
+        // destination-out ВЫЧИТАЕТ альфу там, где источник непрозрачен.
+        // Поэтому каждый край гасится своим градиентом «плотно снаружи →
+        // прозрачно внутрь», а середина фигуры не трогается вовсе.
+        // (destination-in здесь нельзя: маска-полоска стёрла бы всё, что
+        // в неё не попало, то есть саму фигуру.)
+        ctx.globalCompositeOperation = 'destination-out';
+        const edges = [
+          // x0,y0 → x1,y1 (от края внутрь), прямоугольник полосы
+          [bx, by, bx + fx2, by,                bx,               by, fx2,    drawH],
+          [bx + drawW, by, bx + drawW - fx2, by, bx + drawW - fx2, by, fx2,    drawH],
+          [bx, by, bx, by + fy2,                bx,               by, drawW,  fy2],
+          [bx, by + drawH, bx, by + drawH - fy2, bx, by + drawH - fy2, drawW, fy2],
+        ];
+        edges.forEach(function(e) {
+          const g = ctx.createLinearGradient(e[0], e[1], e[2], e[3]);
+          g.addColorStop(0, 'rgba(0,0,0,1)');   // у самого среза — стереть
+          g.addColorStop(1, 'rgba(0,0,0,0)');   // вглубь — не трогать
+          ctx.fillStyle = g;
+          ctx.fillRect(e[4], e[5], e[6], e[7]);
+        });
+        ctx.restore();
+      }
     }
 
     ctx.restore();
@@ -4836,6 +5591,13 @@ const BackgroundEngine = (() => {
       case 'breathe':
         scaleX = scaleY = 1 + Math.sin(t * 0.9) * amt * 0.12 + Math.sin(t * 2.3) * amt * 0.05;
         break;
+      case 'presence': {
+        // Чистая функция звука, без синусов от времени — см. image-версию выше.
+        const kick = Math.max(0, bands.bass - 0.22);
+        const body = bands.mid * 0.35 + bands.overall * 0.25;
+        scaleX = scaleY = 1 + (kick * 0.55 + body * 0.20) * amt;
+        break;
+      }
       case 'glitch': {
         const g = bands.bass > 0.45 ? bands.bass : 0;
         offX = (Math.random() > 0.5 ? 1 : -1) * g * amt * 55;
@@ -5193,9 +5955,38 @@ const BackgroundEngine = (() => {
         effectiveEffect = ov.lineAnimations[activeLineIdx];
       }
 
+      // ── Построчные оверрайды геометрии ──────────────────────────
+      // ov.lineOverrides[i] = { x, y, width, opacity, effectAmt, flipX, ... }
+      // Нужны, чтобы объект (в первую очередь спрайт персонажа) не стоял
+      // всё видео в одной точке, а ходил по кадру от строки к строке:
+      // вставал в противовес тексту, придвигался на припеве, отступал в тень
+      // на куплете. Поля подменяются на время отрисовки и возвращаются
+      // обратно — в редакторе объект остаётся таким, каким его настроили.
+      const _lineOv = (ov.lineOverrides && activeLineIdx >= 0)
+        ? ov.lineOverrides[activeLineIdx] : null;
+      let _ovSaved = null;
+      if (_lineOv) {
+        _ovSaved = {};
+        for (const k in _lineOv) { _ovSaved[k] = ov[k]; ov[k] = _lineOv[k]; }
+      }
+      const _ovRestore = () => {
+        if (!_ovSaved) return;
+        for (const k in _ovSaved) ov[k] = _ovSaved[k];
+        _ovSaved = null;
+      };
+
+      // Есть ли у активной строки видимый текст (после очистки команд/тегов).
+      // Если строка "техническая" (только /ZOOM IN/ и т.п.) — text будет пустым.
+      const lyricHasText = !!(currentLyric && currentLyric.text && currentLyric.text.trim().length > 0);
+
+      // Рамки и композиции по умолчанию прячутся на технических строках без текста
+      // (опционально, можно отключить через ov.hideOnEmptyLyric = false).
+      const _isFrameOrCard = (ov.type === 'frame' || ov.type === 'card');
+      const _hideOnEmpty   = (ov.hideOnEmptyLyric !== false) && _isFrameOrCard;
+
       let shouldBeVisible = false;
       if (ov.scope === 'global') {
-        shouldBeVisible = true;
+        shouldBeVisible = _hideOnEmpty ? lyricHasText : true;
       } else if (ov.scope === 'timeline') {
         if (activeLineIdx >= 0) {
           if (ov.selectedLines && ov.selectedLines.length > 0) {
@@ -5203,24 +5994,22 @@ const BackgroundEngine = (() => {
           } else {
             shouldBeVisible = activeLineIdx >= ov.startLine && activeLineIdx <= ov.endLine;
           }
+          // Для timeline-scope тоже скрываем рамки/карточки на пустых строках,
+          // если они попадают в их диапазон.
+          if (_hideOnEmpty && !lyricHasText) shouldBeVisible = false;
         }
       }
 
       const FADE_SPEED = ov.fadeSpeed || 2.5;
-      if (ov.scope === 'global') {
+      if (shouldBeVisible) {
         ov.fadeTarget = 1;
         if (ov.fadeAlpha < 1) ov.fadeAlpha = Math.min(1, ov.fadeAlpha + FADE_SPEED * dtSafe);
       } else {
-        if (shouldBeVisible) {
-          ov.fadeTarget = 1;
-          if (ov.fadeAlpha < 1) ov.fadeAlpha = Math.min(1, ov.fadeAlpha + FADE_SPEED * dtSafe);
-        } else if (activeLineIdx >= 0) {
-          ov.fadeTarget = 0;
-          if (ov.fadeAlpha > 0) ov.fadeAlpha = Math.max(0, ov.fadeAlpha - FADE_SPEED * dtSafe);
-        }
+        ov.fadeTarget = 0;
+        if (ov.fadeAlpha > 0) ov.fadeAlpha = Math.max(0, ov.fadeAlpha - FADE_SPEED * dtSafe);
       }
 
-      if (ov.fadeAlpha < 0.01) return;
+      if (ov.fadeAlpha < 0.01) { _ovRestore(); return; }
 
       const finalAlpha = Math.max(0, Math.min(1, (ov.opacity || 1) * (ov.fadeAlpha || 1)));
       const { canvas: tempCanvas, ctx: tempCtx } = ensureTempCanvas(cw, ch);
@@ -5232,12 +6021,50 @@ const BackgroundEngine = (() => {
       tempCtx.filter = 'none';
       tempCtx.shadowBlur = 0;
       tempCtx.shadowColor = 'transparent';
+      /* Точку опоры зума берём ДО _ovRestore: там ov.x/ov.y ещё построчные
+         (из lineOverrides), а после — редакторские, и опора уехала бы. */
+      const _camFollow = ov.camFollow;
+      const _camPivotX = (ov.x / 100) * cw;
+      const _camPivotY = (ov.y / 100) * ch;
       _drawOverlayItem(tempCtx, ov, cw, ch, bands, t, effectiveEffect, dt);
+      _ovRestore();
       tempCtx.restore();
       tempCtx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.save();
       ctx.globalAlpha = finalAlpha;
       ctx.globalCompositeOperation = 'source-over';
+      /* ── ЗУМ ОБЪЕКТА ЗАОДНО С ЗУМОМ ФОНА ──────────────────────
+         Фон живёт под камерой сцены, объекты — под ослабленной камерой
+         переднего плана. Из-за этого при наезде фон рос, а фигура почти
+         стояла: два плана переставали быть одной сценой.
+
+         Берём у сцены ТОЛЬКО ЗУМ и разворачиваем его вокруг точки самой
+         фигуры. Полную трансформацию применять нельзя, и это проверено
+         кадром: в ней есть ещё и перенос по фокусу относительно ЦЕНТРА
+         КАДРА, а фигура стоит у края (x ≈ 82%) — от такого переноса её
+         правый край уезжал за 110% ширины, то есть просто вываливался из
+         кадра. Своя опора даёт ровно то, что нужно: фигура растёт и
+         сжимается синхронно с фоном, оставаясь на своём месте в композиции. */
+      if (_camFollow != null && _fgCamBase) {
+        // Зум сцены (медленная кинематография) …
+        const sv = evaluateLineScene(bands, t);
+        const zScene = (sv && sv.blend > 0.001)
+          ? 1 + (sv.zoom - 1) * sv.blend * _camFollow : 1;
+        /* … и зум от БАСА, который фон получает в drawMedia в обход камеры
+           сцены. Без него фигура игнорировала именно то движение, которое
+           в кадре и читается — удар на бите. Оба множителя перемножаются:
+           это ровно то, что происходит с фоном. */
+        const zBass = 1 + (_bgBassZoom - 1) * _camFollow;
+        const z = zScene * zBass;
+        if (Math.abs(z - 1) > 0.001) {
+          // Свой save не нужен: мы уже внутри ctx.save() выше, и общий
+          // ctx.restore() вернёт трансформацию вместе с alpha.
+          ctx.setTransform(_fgCamBase);
+          ctx.translate(_camPivotX, _camPivotY);
+          ctx.scale(z, z);
+          ctx.translate(-_camPivotX, -_camPivotY);
+        }
+      }
       ctx.drawImage(tempCanvas, 0, 0);
       ctx.restore();
     }
@@ -5247,18 +6074,38 @@ const BackgroundEngine = (() => {
       for (let i = 0; i < overlays.length; i++) _renderOv(overlays[i]);
     };
 
-    // Все оверлеи рендерятся строго в порядке массива (единая иерархия).
-    // ov.layer на рендер НЕ влияет — это отдельный флаг лирики.
-    // Позиция текста определяется ТОЛЬКО кнопкой лирики (lyricLayerOverride):
-    //   'above' = "объекты выше текста" → текст ДО всех объектов (текст внизу)
-    //   'below' = "объекты ниже текста" → текст ПОСЛЕ всех объектов (текст сверху)
-    //   default → текст сверху (на всех объектах)
+    // Render order:
+    //   per-overlay ov.layer === 'below'  → рисуются ПЕРЕД текстом
+    //   текст
+    //   per-overlay ov.layer === 'above'  → рисуются ПОСЛЕ текста (поверх)
+    // Если у лирики есть lineStyle.layer override — он бьёт per-overlay настройку
+    // для текущей строки (легаси, нужно для команд /ABOVE/ /BELOW/ из LRC).
+    function _renderLayer(targetLayer) {
+      for (let i = 0; i < overlays.length; i++) {
+        const ov = overlays[i];
+        // Слой тоже может переопределяться построчно: персонаж уходит за текст
+        // на плотных строках и выходит перед ним на ударных.
+        const _loLayer = (ov.lineOverrides && activeLineIdx >= 0 &&
+                          ov.lineOverrides[activeLineIdx] &&
+                          ov.lineOverrides[activeLineIdx].layer) || null;
+        const lay = lyricLayerOverride || _loLayer || ov.layer || 'above';
+        if (lay !== targetLayer) continue;
+        _renderOv(ov);
+      }
+    }
     if (lyricLayerOverride === 'above') {
+      // Лирика говорит "все объекты выше меня" → текст полностью под объектами
       _drawText();
-      _renderAll();
+      _renderLayer('above');
+    } else if (lyricLayerOverride === 'below') {
+      // Лирика говорит "все объекты ниже меня" → текст поверх всего
+      _renderLayer('below');
+      _drawText();
     } else {
-      _renderAll();
+      // Дефолт: уважаем per-overlay ov.layer
+      _renderLayer('below');
       _drawText();
+      _renderLayer('above');
     }
   }
 
@@ -5470,7 +6317,15 @@ const BackgroundEngine = (() => {
     musicZoomTransitionSpring.target = cam.musicZoom.enabled ? 1 : 0;
     musicZoomTransitionSpring.update(dt);
     const transitionAmount = musicZoomTransitionSpring.value;
-    
+
+    /* Сколько зума добавил именно /ZOOM IN/ — ВСЁ, что он даёт, а не только
+       качание на басу. У него две составляющих: постоянный наезд
+       (baseZoomOffset) и пульс от баса (musicZoomSpring). Копим обе, чтобы
+       объекты с camFollow повторили наезд целиком. Пока сюда попадал один
+       лишь пульс, фон при /ZOOM IN/ наезжал на 0.35, а фигура — нет: это и
+       выглядело как «зум только у фона». */
+    let _musicZoomAdd = 0;
+
     if (transitionAmount > 0.001) {
       ensureMusicZoomSpring();
 
@@ -5501,43 +6356,49 @@ const BackgroundEngine = (() => {
       musicZoomSpring.update(dt);
 
       // Базовый зум + качание от баса
-      zoom += baseZoomOffset * transitionAmount + musicZoomSpring.value;
+      _musicZoomAdd = baseZoomOffset * transitionAmount + musicZoomSpring.value;
+      zoom += _musicZoomAdd;
     } else if (musicZoomSpring && Math.abs(musicZoomSpring.value) > 0.0005) {
       // Плавно гасим spring когда зум выключается
       musicZoomSpring.target = 0;
       musicZoomSpring.update(dt);
-      zoom += musicZoomSpring.value;
+      _musicZoomAdd = musicZoomSpring.value;
+      zoom += _musicZoomAdd;
     } else if (musicZoomSpring) {
       musicZoomSpring.reset(0);
       _musicZoomBassSmooth = 0;
     }
 
+    /* ── ВО СКОЛЬКО РАЗ /ZOOM IN/ РАСТЯНУЛ ФОН ────────────────
+       Музыкальный зум живёт ЗДЕСЬ и применяется только к медиа-фону: он не
+       проходит через applySceneTransform и потому не виден ни объектам, ни
+       тексту. Из-за этого фон наезжал и качался на бите, а фигура в кадре
+       стояла как вкопанная — рассинхрон, который никакой камерой сцены не
+       лечится, потому что музыкального зума в камере сцены попросту нет.
+
+       Берём ВЕСЬ вклад /ZOOM IN/ (_musicZoomAdd = постоянный наезд + пульс
+       баса) и переводим в множитель относительно того же кадра без него.
+       Объекты с ov.camFollow домножают на него свой зум и наезжают вместе с
+       фоном. Считаем ДО clamp'а на 1.0 и до text-driven камеры: нужен вклад
+       именно музыкального зума, а не итоговая величина. */
+    const _zoomNoMusic = zoom - _musicZoomAdd;
+    _bgBassZoom = (_zoomNoMusic > 0.01) ? (zoom / _zoomNoMusic) : 1;
+
     // Гарантируем минимум — изображение всегда покрывает холст
     zoom = Math.max(1.0, zoom);
 
     // ══ TEXT-DRIVEN CAMERA OVERRIDE ══════════════
-    // Анимация текста (montage и пр.) управляет зумом/паном фона через
-    // setTextDrivenCamera(). Здесь применяем накопленное значение с
-    // плавным decay: когда источник перестал звать, эффект за 150мс
-    // возвращается к нейтралу (zoomMul=1, pan=0).
-    //
-    // k — текущая "сила" эффекта (0..1). При активном источнике _decay=1.
-    // _decay списывается КАЖДЫЙ кадр на dt/0.15; если источник снова звал
-    // setTextDrivenCamera() — _decay опять = 1 (в setTextDrivenCamera).
+    // Анимация текста (montage/drift) управляет зумом/паном фона через
+    // setTextDrivenCamera(). Эффективные значения с decay вычисляются
+    // централизованно — decay тикается в tickTextDrivenCamera() (раз за
+    // кадр из App.js/ExportEngine), здесь только применяем.
+    const _txc = getEffectiveTextCamera();
     let textPanX = 0, textPanY = 0;
-    if (textCam._decay > 0) {
-      const k = textCam._decay;
-      // LERP от нейтрала к override. Когда k=1 — полный эффект,
-      // когда k→0 — плавное возвращение к zoom × 1.
-      const effectiveZoomMul = 1 + (textCam.zoomMul - 1) * k;
-      zoom *= effectiveZoomMul;
+    if (_txc.active) {
+      zoom *= _txc.zoomMul;
       zoom = Math.max(1.0, zoom);
-      textPanX = textCam.panX * k;
-      textPanY = textCam.panY * k;
-      // Списываем decay — на следующем кадре эффект будет слабее если
-      // источник не позвал setTextDrivenCamera() повторно.
-      textCam._decay -= Math.max(dt, 0.001) / 0.15;
-      if (textCam._decay < 0) textCam._decay = 0;
+      textPanX = _txc.panX;
+      textPanY = _txc.panY;
     }
 
     // Итоговый размер (вычисляем один раз)
@@ -5593,7 +6454,7 @@ const BackgroundEngine = (() => {
     // Используем уже интерполированные значения textPanX/textPanY
     // (посчитаны выше с учётом decay). Инвертирован: если камера
     // "смотрит вправо", фон смещается влево.
-    if (textCam._decay > 0 || textPanX !== 0 || textPanY !== 0) {
+    if (_txc.active || textPanX !== 0 || textPanY !== 0) {
       kbPanX -= textPanX;
       kbPanY -= textPanY;
     }
@@ -5659,36 +6520,75 @@ const BackgroundEngine = (() => {
       const step   = blurPx / passes;
       const passA  = 1 / (passes * 2 + 1); // суммарная alpha = 1
 
-      // Временный буфер для исходного кадра
+      // ОПТИМИЗАЦИЯ: 13 проходов (центр + 3×4 смещения) в полном разрешении —
+      // это ~27 мегапикселей композитинга на кадр при 1080p, отсюда лаги.
+      // Размытие всё равно уничтожает детали, поэтому все проходы делаем на
+      // буфере уменьшенном в DS раз (цена падает в DS² раз), а наверх отдаём
+      // одним растянутым drawImage — интерполяция добавляет мягкости бесплатно.
+      // Итого ~1.8 полноразмерных прохода вместо 13.
+      const DS = 4;
+      const bw = Math.max(1, Math.ceil(cw / DS));
+      const bh = Math.max(1, Math.ceil(ch / DS));
+
+      // Буфер исходного кадра (уменьшенный)
       if (!BackgroundEngine._blurBuf ||
-          BackgroundEngine._blurBuf.width  !== cw ||
-          BackgroundEngine._blurBuf.height !== ch) {
+          BackgroundEngine._blurBuf.width  !== bw ||
+          BackgroundEngine._blurBuf.height !== bh) {
         BackgroundEngine._blurBuf    = document.createElement('canvas');
-        BackgroundEngine._blurBuf.width  = cw;
-        BackgroundEngine._blurBuf.height = ch;
+        BackgroundEngine._blurBuf.width  = bw;
+        BackgroundEngine._blurBuf.height = bh;
         BackgroundEngine._blurBufCtx = BackgroundEngine._blurBuf.getContext('2d');
       }
+      // Буфер накопления проходов (тоже уменьшенный)
+      if (!BackgroundEngine._blurAcc ||
+          BackgroundEngine._blurAcc.width  !== bw ||
+          BackgroundEngine._blurAcc.height !== bh) {
+        BackgroundEngine._blurAcc    = document.createElement('canvas');
+        BackgroundEngine._blurAcc.width  = bw;
+        BackgroundEngine._blurAcc.height = bh;
+        BackgroundEngine._blurAccCtx = BackgroundEngine._blurAcc.getContext('2d');
+      }
+
       const bc  = BackgroundEngine._blurBuf;
       const bcc = BackgroundEngine._blurBufCtx;
+      const ac  = BackgroundEngine._blurAcc;
+      const acc = BackgroundEngine._blurAccCtx;
+
+      // drawMediaFrame рисует в координатах cw×ch — сжимаем его трансформом
+      bcc.setTransform(1 / DS, 0, 0, 1 / DS, 0, 0);
       bcc.clearRect(0, 0, cw, ch);
       // Применяем только colorGrade-фильтр на исходнике (без blur)
       bcc.filter = filterParts.length ? filterParts.join(' ') : 'none';
       drawMediaFrame(bcc);
       bcc.filter = 'none';
+      bcc.setTransform(1, 0, 0, 1, 0, 0);
 
-      // Сбрасываем filter на основном ctx (blur рисуем вручную)
-      ctx.filter = 'none';
-      // Центральный проход (полный вес)
-      ctx.globalAlpha = passA;
-      ctx.drawImage(bc, 0, 0);
-      // Смещённые проходы
+      // Размытие раздельное: сначала по X, потом по Y. Даёт тот же радиус
+      // за 2·(2P+1) проходов вместо (4P+1) и ближе к гауссу по форме ядра.
+      acc.setTransform(1, 0, 0, 1, 0, 0);
+      acc.clearRect(0, 0, bw, bh);
+      acc.globalAlpha = passA;
+      acc.drawImage(bc, 0, 0);
       for (let p = 1; p <= passes; p++) {
-        const o = Math.round(step * p);
-        ctx.globalAlpha = passA;
-        ctx.drawImage(bc,  o,  0); ctx.drawImage(bc, -o,  0);
-        ctx.drawImage(bc,  0,  o); ctx.drawImage(bc,  0, -o);
+        const o = (step * p) / DS;
+        acc.drawImage(bc, o, 0); acc.drawImage(bc, -o, 0);
       }
+      acc.globalAlpha = 1;
+
+      bcc.clearRect(0, 0, bw, bh);
+      bcc.globalAlpha = passA;
+      bcc.drawImage(ac, 0, 0);
+      for (let p = 1; p <= passes; p++) {
+        const o = (step * p) / DS;
+        bcc.drawImage(ac, 0, o); bcc.drawImage(ac, 0, -o);
+      }
+      bcc.globalAlpha = 1;
+
+      // Один растянутый проход наверх
+      ctx.filter = 'none';
       ctx.globalAlpha = 1;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(bc, 0, 0, bw, bh, 0, 0, cw, ch);
     } else {
       // Без blur — обычный рендер
       drawMediaFrame(ctx);
@@ -5954,37 +6854,73 @@ const BackgroundEngine = (() => {
     // Blur-оверлей: размываем всё что нарисовано до этой точки (фон),
     // текст будет отрисован сверху без размытия.
     if (bgTransitions.blurAmount > 0.001) {
-      const blurPx = Math.round(8 * bgTransitions.blurAmount);
-      const passes = 3;
-      const step   = blurPx / passes;
+      // Раньше здесь было 13 проходов drawImage в ПОЛНОМ разрешении плюс
+      // полный снимок канваса — ~27 мегапикселей композитинга на кадр при
+      // 1080p, и именно отсюда шли просадки (оптимизацию когда-то применили
+      // только ко второму пути размытия, в drawMedia).
+      // Теперь: снимок сразу уменьшается в DS раз (цена падает в DS²),
+      // размытие раздельное (H, затем V — 2·(2P+1) проходов вместо (4P+1)
+      // и результат ближе к гауссу), наверх — один растянутый drawImage,
+      // билинейная интерполяция которого добавляет мягкости бесплатно.
+      const DS     = 4;
+      const passes = 2;
+      const blurPx = 8 * bgTransitions.blurAmount;
+      const step   = (blurPx / passes) / DS;
       const passA  = 1 / (passes * 2 + 1);
 
+      const bw = Math.max(1, Math.ceil(cw / DS));
+      const bh = Math.max(1, Math.ceil(ch / DS));
+
       if (!BackgroundEngine._fxBlurBuf ||
-          BackgroundEngine._fxBlurBuf.width  !== cw ||
-          BackgroundEngine._fxBlurBuf.height !== ch) {
-        BackgroundEngine._fxBlurBuf    = document.createElement('canvas');
-        BackgroundEngine._fxBlurBuf.width  = cw;
-        BackgroundEngine._fxBlurBuf.height = ch;
-        BackgroundEngine._fxBlurBufCtx = BackgroundEngine._fxBlurBuf.getContext('2d');
+          BackgroundEngine._fxBlurBuf.width  !== bw ||
+          BackgroundEngine._fxBlurBuf.height !== bh) {
+        BackgroundEngine._fxBlurBuf        = document.createElement('canvas');
+        BackgroundEngine._fxBlurBuf.width  = bw;
+        BackgroundEngine._fxBlurBuf.height = bh;
+        BackgroundEngine._fxBlurBufCtx     = BackgroundEngine._fxBlurBuf.getContext('2d');
+        BackgroundEngine._fxBlurAcc        = document.createElement('canvas');
+        BackgroundEngine._fxBlurAcc.width  = bw;
+        BackgroundEngine._fxBlurAcc.height = bh;
+        BackgroundEngine._fxBlurAccCtx     = BackgroundEngine._fxBlurAcc.getContext('2d');
       }
       const bc  = BackgroundEngine._fxBlurBuf;
       const bcc = BackgroundEngine._fxBlurBufCtx;
+      const ac  = BackgroundEngine._fxBlurAcc;
+      const acc = BackgroundEngine._fxBlurAccCtx;
 
-      // Снимаем текущее содержимое canvas на буфер
-      bcc.clearRect(0, 0, cw, ch);
-      bcc.drawImage(ctx.canvas, 0, 0);
+      // Снимок кадра сразу в уменьшенном виде
+      bcc.globalAlpha = 1;
+      bcc.imageSmoothingEnabled = true;
+      bcc.clearRect(0, 0, bw, bh);
+      bcc.drawImage(ctx.canvas, 0, 0, cw, ch, 0, 0, bw, bh);
 
-      // Затираем фон и накладываем размытые копии со смещением
+      // Горизонтальный проход: bc → ac
+      acc.globalAlpha = 1;
+      acc.clearRect(0, 0, bw, bh);
+      acc.globalAlpha = passA;
+      acc.drawImage(bc, 0, 0);
+      for (let p = 1; p <= passes; p++) {
+        const o = step * p;
+        acc.drawImage(bc, o, 0); acc.drawImage(bc, -o, 0);
+      }
+      acc.globalAlpha = 1;
+
+      // Вертикальный проход: ac → bc
+      bcc.clearRect(0, 0, bw, bh);
+      bcc.globalAlpha = passA;
+      bcc.drawImage(ac, 0, 0);
+      for (let p = 1; p <= passes; p++) {
+        const o = step * p;
+        bcc.drawImage(ac, 0, o); bcc.drawImage(ac, 0, -o);
+      }
+      bcc.globalAlpha = 1;
+
+      // Один растянутый проход наверх
       ctx.fillStyle = '#0a0a0a';
       ctx.fillRect(0, 0, cw, ch);
-      ctx.globalAlpha = passA;
-      ctx.drawImage(bc, 0, 0);
-      for (let p = 1; p <= passes; p++) {
-        const o = Math.round(step * p);
-        ctx.drawImage(bc,  o,  0); ctx.drawImage(bc, -o,  0);
-        ctx.drawImage(bc,  0,  o); ctx.drawImage(bc,  0, -o);
-      }
       ctx.globalAlpha = 1;
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(bc, 0, 0, bw, bh, 0, 0, cw, ch);
     }
 
     drawDarkenOverlay(ctx, cw, ch);
@@ -5994,6 +6930,489 @@ const BackgroundEngine = (() => {
   function drawLetterboxLayer(ctx, cw, ch, bands, dt) {
     drawLetterbox(ctx, cw, ch, bands, dt);
   }
+
+  /* ═══════════════════════════════════════════════
+     ENDING SEQUENCE — финальная прощальная анимация
+     [конец] / [end] / /КОНЕЦ ВИДЕО/ в LRC запускают её
+  ═══════════════════════════════════════════════ */
+  const ending = {
+    time:     null,     // абсолютное время старта (сек)
+    duration: 12.0,     // длительность всей прощальной анимации (сек)
+    fadeFrac: 0.35,     // доля длительности на fade-out контента/звука (35% = ~4.2с при D=12)
+    titleRu:  'СПАСИБО ЗА ПРОСМОТР',
+    titleEn:  'Thank you for watching',
+    subRu:    'Это была история, и она дошла до конца',
+    subEn:    'A story that has reached its end',
+  };
+
+  function setEndingMarker(time, opts = {}) {
+    ending.time     = (time == null) ? null : Math.max(0, time);
+    if (opts.duration) ending.duration = opts.duration;
+    if (opts.fadeFrac) ending.fadeFrac = opts.fadeFrac;
+    if (opts.titleRu)  ending.titleRu  = opts.titleRu;
+    if (opts.titleEn)  ending.titleEn  = opts.titleEn;
+    if (opts.subRu)    ending.subRu    = opts.subRu;
+    if (opts.subEn)    ending.subEn    = opts.subEn;
+  }
+  function clearEndingMarker() { ending.time = null; }
+  function getEndingMarker()   {
+    return ending.time == null
+      ? null
+      : { time: ending.time, duration: ending.duration, fadeFrac: ending.fadeFrac };
+  }
+
+  // Вернуть состояние ending в текущий момент времени t (сек)
+  function getEndingState(t) {
+    if (ending.time == null || t < ending.time) {
+      return { active: false, contentAlpha: 1, audioVolume: 1, progress: 0 };
+    }
+    const dt = t - ending.time;
+    const p  = Math.min(dt / ending.duration, 1);
+    const fadeDur = ending.duration * ending.fadeFrac;
+    const fadeT   = Math.min(dt / fadeDur, 1);
+    // Smoothstep^2 — ещё более плавная кривая, особенно медленный старт
+    const fSmooth = fadeT * fadeT * fadeT * (fadeT * (fadeT * 6 - 15) + 10);  // smootherstep
+    return {
+      active:       true,
+      progress:     p,
+      contentAlpha: 1 - fSmooth,
+      audioVolume:  1 - fSmooth,
+      dt,
+    };
+  }
+
+  // Рисует прощальную анимацию поверх всего
+  function drawEnding(ctx, cw, ch, t) {
+    if (ending.time == null || t < ending.time) return;
+    const dt = t - ending.time;
+    const D  = ending.duration;
+    const p  = Math.min(dt / D, 1);
+
+    // Lazy init атмосферных частиц (детерминированный дрейф от dt)
+    if (!ending._particles) {
+      const arr = [];
+      for (let i = 0; i < 60; i++) {
+        arr.push({
+          x:        Math.random(),
+          yOffset:  Math.random(),
+          speed:    0.018 + Math.random() * 0.035,
+          sway:     6 + Math.random() * 18,
+          swayFreq: 0.20 + Math.random() * 0.40,
+          phase:    Math.random() * Math.PI * 2,
+          size:     0.7 + Math.random() * 1.6,
+          accent:   Math.random() < 0.30,
+          alpha:    0.20 + Math.random() * 0.45,
+        });
+      }
+      ending._particles = arr;
+    }
+
+    // ── 1. Атмосферная подложка ─────────────────────────────
+    // Появляется плавно вместе с fade контента (35% от D)
+    const bgT = Math.min(dt / (D * ending.fadeFrac), 1);
+    const bg  = bgT * bgT * bgT * (bgT * (bgT * 6 - 15) + 10);   // smootherstep
+    if (bg < 0.02) return;
+
+    // Тёмный кинематографичный градиент (не чисто чёрный — слегка синева сверху, тепло снизу)
+    const bgGrad = ctx.createLinearGradient(0, 0, 0, ch);
+    bgGrad.addColorStop(0,   `rgba(6,10,16,${bg})`);
+    bgGrad.addColorStop(0.5, `rgba(2,4,8,${bg})`);
+    bgGrad.addColorStop(1,   `rgba(8,6,4,${bg})`);
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Виньетка (резкая по краям, мягкая в центре)
+    const vg = ctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.2,
+                                        cw / 2, ch / 2, Math.max(cw, ch) * 0.75);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(0.6, `rgba(0,0,0,${0.35 * bg})`);
+    vg.addColorStop(1, `rgba(0,0,0,${0.85 * bg})`);
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, cw, ch);
+
+    // Очень тонкие горизонтальные scan lines — старая киноплёнка
+    if (bg > 0.6) {
+      ctx.save();
+      ctx.globalAlpha = 0.07 * bg;
+      ctx.fillStyle = '#000';
+      const lineStep = 3;
+      for (let y = 0; y < ch; y += lineStep * 2) {
+        ctx.fillRect(0, y, cw, 1);
+      }
+      ctx.restore();
+    }
+
+    // Постоянный film grain (живой, не только в финале)
+    if (bg > 0.5) {
+      ctx.save();
+      ctx.globalAlpha = 0.045 * bg;
+      ctx.fillStyle = '#ffffff';
+      for (let i = 0; i < 140; i++) {
+        ctx.fillRect(Math.random() * cw, Math.random() * ch, 1.3, 1.3);
+      }
+      ctx.restore();
+    }
+
+    // Глобальные параметры композиции
+    const cx = cw / 2;
+    const cy = ch / 2;
+    const accent = '#e8ff00';
+    const accentR = 232, accentG = 255, accentB = 0;
+    const textCol = '#f4eedd';      // тёплый кремовый, не чисто белый
+
+    // Subtle breathing — вся композиция дышит на ±1px
+    const breath = Math.sin(dt * 0.9) * 1.2;
+    ctx.save();
+    ctx.translate(0, breath);
+
+    // ── 1.5. Атмосферные пылинки в жёлтом свете (дрейф вверх) ──
+    if (bg > 0.25) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const particles = ending._particles;
+      for (let i = 0; i < particles.length; i++) {
+        const prt = particles[i];
+        const cycle = ((prt.yOffset + dt * prt.speed) % 1 + 1) % 1;
+        const py = ch * (1 - cycle);
+        const px = prt.x * cw + Math.sin(dt * prt.swayFreq + prt.phase) * prt.sway;
+        const life = Math.sin(cycle * Math.PI);   // 0 → 1 → 0 за цикл
+        const a = bg * prt.alpha * life;
+        if (a < 0.005) continue;
+        ctx.fillStyle = prt.accent
+          ? `rgba(232,255,0,${a})`
+          : `rgba(244,238,221,${a * 0.65})`;
+        ctx.beginPath();
+        ctx.arc(px, py, prt.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ── 2. Eyebrow tag (NS «// EPILOGUE») — самым первым ───────
+    const ebStart = 0.18, ebEnd = 0.32;
+    const ebP = _clamp01((p - ebStart) / (ebEnd - ebStart));
+    const ebK = _easeOutCubic(ebP);
+    if (ebK > 0) {
+      ctx.save();
+      ctx.globalAlpha = ebK * 0.75;
+      ctx.font = '600 11px "JetBrains Mono", monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = accent;
+      const eyebrowSize = Math.round(ch * 0.085);
+      ctx.fillText('// EPILOGUE', cx, cy - eyebrowSize * 1.55);
+      // Маленькие горизонтальные риски по бокам
+      const tag = '// EPILOGUE';
+      const tagW = ctx.measureText(tag).width;
+      const tickGap = 18, tickLen = 22 * ebK;
+      ctx.fillRect(cx - tagW / 2 - tickGap - tickLen, cy - eyebrowSize * 1.55 - 0.5, tickLen, 1);
+      ctx.fillRect(cx + tagW / 2 + tickGap, cy - eyebrowSize * 1.55 - 0.5, tickLen, 1);
+      ctx.restore();
+    }
+
+    // ── 3. Главный RU-заголовок — каскадные буквы, более долго ─
+    const titleStart = 0.22, titleEnd = 0.62;
+    const titleP = _clamp01((p - titleStart) / (titleEnd - titleStart));
+    if (titleP > 0) {
+      const titleSize = Math.round(ch * 0.092);
+      const titleY = cy - titleSize * 0.35;
+      ctx.save();
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.font = `900 ${titleSize}px "Bebas Neue", "Oswald", sans-serif`;
+      const letters = (ending.titleRu || '').split('');
+      const letterSpacing = titleSize * 0.20;
+      let totalW = 0;
+      const widths = [];
+      for (const c1 of letters) {
+        const w = ctx.measureText(c1).width;
+        widths.push(w);
+        totalW += w + letterSpacing;
+      }
+      totalW -= letterSpacing;
+
+      // Световое "свечение" пробегает по тексту слева направо
+      const sweepP = _clamp01((p - 0.30) / 0.45);  // 0..1 за 0.30..0.75
+      const sweepK = sweepP;                        // линейно
+
+      let xCursor = cx - totalW / 2;
+      for (let i = 0; i < letters.length; i++) {
+        // Каждая буква имеет свой timing — каскад с длинной задержкой
+        const lp = _clamp01(titleP * 1.6 - i * 0.055);
+        const lk = _easeOutCubic(lp);
+        const dyOff = (1 - lk) * titleSize * 0.45;
+        const blurOff = (1 - lk) * 8;
+        if (lk < 0.02) { xCursor += widths[i] + letterSpacing; continue; }
+
+        // Расстояние буквы от sweep-фронта (для подсветки)
+        const letterCenterX = xCursor + widths[i] / 2;
+        const sweepX = (cx - totalW / 2) + sweepK * totalW;
+        const sweepDist = Math.abs(letterCenterX - sweepX) / (titleSize * 1.2);
+        const sweepBoost = Math.max(0, 1 - sweepDist) * 0.7;
+
+        ctx.globalAlpha = lk;
+        // Двойной слой: glow + body
+        ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},${(0.35 + sweepBoost * 0.5) * lk})`;
+        ctx.shadowBlur  = (18 + blurOff + sweepBoost * 30) * lk;
+        ctx.fillStyle = textCol;
+        ctx.fillText(letters[i], xCursor, titleY + dyOff);
+        xCursor += widths[i] + letterSpacing;
+      }
+      ctx.shadowBlur = 0;
+      ctx.restore();
+
+      // ── Декоративная разделительная линия ─ ◇ ─ под заголовком ──
+      const sepP = _clamp01((p - 0.42) / 0.20);
+      const sepK = _easeOutCubic(sepP);
+      if (sepK > 0) {
+        const sepY = titleY + titleSize * 0.70;
+        ctx.save();
+        ctx.globalAlpha = sepK * 0.9;
+        // Боковые линии (slide-out от центра)
+        const maxLineW = cw * 0.16;
+        const lineW = maxLineW * sepK;
+        const gap = 22;
+        // Левая
+        const gl = ctx.createLinearGradient(cx - gap - lineW, 0, cx - gap, 0);
+        gl.addColorStop(0, 'rgba(232,255,0,0)');
+        gl.addColorStop(0.6, 'rgba(232,255,0,0.5)');
+        gl.addColorStop(1, 'rgba(232,255,0,0.85)');
+        ctx.fillStyle = gl;
+        ctx.fillRect(cx - gap - lineW, sepY - 0.5, lineW, 1);
+        // Правая
+        const gr = ctx.createLinearGradient(cx + gap, 0, cx + gap + lineW, 0);
+        gr.addColorStop(0, 'rgba(232,255,0,0.85)');
+        gr.addColorStop(0.4, 'rgba(232,255,0,0.5)');
+        gr.addColorStop(1, 'rgba(232,255,0,0)');
+        ctx.fillStyle = gr;
+        ctx.fillRect(cx + gap, sepY - 0.5, lineW, 1);
+        // Ромб ◇ по центру с подсветкой
+        const dShape = 6 * sepK;
+        const pulse = 0.85 + Math.sin(dt * 1.8) * 0.15;
+        ctx.translate(cx, sepY);
+        ctx.rotate(Math.PI / 4);
+        ctx.fillStyle = `rgba(232,255,0,${pulse * sepK})`;
+        ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},${0.5 * sepK})`;
+        ctx.shadowBlur = 14 * sepK;
+        ctx.fillRect(-dShape / 2, -dShape / 2, dShape, dShape);
+        ctx.shadowBlur = 0;
+        ctx.restore();
+      }
+    }
+
+    // ── 4. RU подзаголовок ("Это была история...") ─────────────
+    const subRuStart = 0.50, subRuEnd = 0.75;
+    const subRuP = _clamp01((p - subRuStart) / (subRuEnd - subRuStart));
+    const subRuK = _easeOutCubic(subRuP);
+    if (subRuK > 0 && ending.subRu) {
+      const subSize = Math.round(ch * 0.024);
+      const subY = cy + ch * 0.045 + (1 - subRuK) * 14;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `400 ${subSize}px "Inter", system-ui, sans-serif`;
+      ctx.globalAlpha = subRuK * 0.62;
+      ctx.fillStyle = textCol;
+      ctx.letterSpacing = '2px';
+      ctx.fillText(ending.subRu, cx, subY);
+      ctx.restore();
+    }
+
+    // ── 5. Английский — печатающаяся машинка (typewriter) ──────
+    const enStart = 0.55, enEnd = 0.88;
+    const enP = _clamp01((p - enStart) / (enEnd - enStart));
+    if (enP > 0) {
+      const enSize = Math.round(ch * 0.045);
+      const enY = cy + ch * 0.13;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `italic 500 ${enSize}px "Playfair Display", "Inter", Georgia, serif`;
+      const fullText = ending.titleEn || '';
+      // Печатаем посимвольно (typewriter)
+      const totalChars = fullText.length;
+      const visible = Math.ceil(enP * totalChars);
+      const visibleText = fullText.slice(0, visible);
+      // Курсор моргает только пока ещё печатает
+      const showCursor = visible < totalChars && (Math.floor(dt * 2) % 2 === 0);
+
+      ctx.globalAlpha = 0.92;
+      ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},0.22)`;
+      ctx.shadowBlur = 14;
+      ctx.fillStyle = textCol;
+      ctx.fillText(visibleText + (showCursor ? '▎' : ''), cx, enY);
+      ctx.shadowBlur = 0;
+
+      // Подчёркивающая полоска появляется когда печать закончилась
+      if (visible >= totalChars) {
+        const undP = _clamp01((p - (enStart + (enEnd - enStart) * 0.85)) / 0.10);
+        const undK = _easeOutCubic(undP);
+        if (undK > 0) {
+          const fullW = ctx.measureText(fullText).width;
+          const undW = fullW * 0.55 * undK;
+          const undY = enY + enSize * 0.78;
+          const ug = ctx.createLinearGradient(cx - undW / 2, 0, cx + undW / 2, 0);
+          ug.addColorStop(0,   'rgba(232,255,0,0)');
+          ug.addColorStop(0.5, `rgba(232,255,0,${0.7 * undK})`);
+          ug.addColorStop(1,   'rgba(232,255,0,0)');
+          ctx.fillStyle = ug;
+          ctx.fillRect(cx - undW / 2, undY, undW, 1);
+        }
+      }
+      ctx.restore();
+    }
+
+    // ── 6. EN sub-tagline ("A story that has reached its end") ──
+    const subEnStart = 0.70, subEnEnd = 0.90;
+    const subEnP = _clamp01((p - subEnStart) / (subEnEnd - subEnStart));
+    const subEnK = _easeOutCubic(subEnP);
+    if (subEnK > 0 && ending.subEn) {
+      const subSize = Math.round(ch * 0.020);
+      const subY = cy + ch * 0.20;
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = `italic 400 ${subSize}px "Playfair Display", Georgia, serif`;
+      ctx.globalAlpha = subEnK * 0.50;
+      ctx.fillStyle = textCol;
+      ctx.fillText('— ' + ending.subEn + ' —', cx, subY);
+      ctx.restore();
+    }
+
+    ctx.restore();  // снимаем breath translate
+
+    // ── 7. Брендовая подпись внизу с тонкой рамкой ──────────────
+    const brandStart = 0.78, brandEnd = 0.95;
+    const brandP = _clamp01((p - brandStart) / (brandEnd - brandStart));
+    const brandK = _easeOutCubic(brandP);
+    if (brandK > 0) {
+      const year = new Date().getFullYear();
+      ctx.save();
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = '600 10.5px "JetBrains Mono", monospace';
+      ctx.globalAlpha = brandK * 0.55;
+      ctx.fillStyle = textCol;
+      const brandText = `${year}  ·  CRAFTED WITH RICOLE / PROJECT`;
+      const bw = ctx.measureText(brandText).width;
+      const by = ch - Math.min(cw, ch) * 0.045;
+      // Боковые риски
+      const tickW = 18 * brandK;
+      const tickGap = 14;
+      ctx.fillRect(cx - bw / 2 - tickGap - tickW, by - 0.5, tickW, 1);
+      ctx.fillRect(cx + bw / 2 + tickGap, by - 0.5, tickW, 1);
+      ctx.fillText(brandText, cx, by);
+      ctx.restore();
+    }
+
+    // ── 7.5. SIGNAL waveform → flatline (умирает к концу) ─────
+    const wfStart = 0.42, wfEnd = 1.0;
+    const wfP = _clamp01((p - wfStart) / (wfEnd - wfStart));
+    if (wfP > 0) {
+      const wfFadeIn  = _clamp01(wfP / 0.08);
+      const wfFlatten = _clamp01((wfP - 0.55) / 0.40);   // последние 40% сплющиваем
+      const amp = (1 - wfFlatten) * 5.5;
+      const wfW = cw * 0.32;
+      const wfY = ch - Math.min(cw, ch) * 0.082;
+      const wfX0 = cx - wfW / 2;
+      const segs = 88;
+      ctx.save();
+      ctx.globalAlpha = wfFadeIn * 0.50;
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let i = 0; i <= segs; i++) {
+        const xn = i / segs;
+        const xx = wfX0 + xn * wfW;
+        const n =
+          Math.sin(xn * 22 + dt * 6.0) * 0.5 +
+          Math.sin(xn * 41 - dt * 9.0) * 0.3 +
+          Math.sin(xn * 7  + dt * 3.0) * 0.2;
+        const edgeTaper = Math.sin(xn * Math.PI);
+        const yy = wfY + n * amp * edgeTaper;
+        if (i === 0) ctx.moveTo(xx, yy);
+        else ctx.lineTo(xx, yy);
+      }
+      ctx.stroke();
+      // Playhead — гаснет вместе с амплитудой
+      if (wfFlatten < 0.95) {
+        const headAlpha = wfFadeIn * (1 - wfFlatten * 0.7);
+        const headX = wfX0 + wfW * (0.50 + Math.sin(dt * 1.4) * 0.18);
+        ctx.globalAlpha = headAlpha * 0.85;
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.arc(headX, wfY, 1.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = headAlpha * 0.30;
+        ctx.beginPath();
+        ctx.arc(headX, wfY, 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ── 8. Corner brackets с tech-метками ──────────────────────
+    const cornerP = _clamp01((p - 0.62) / 0.18);
+    const cornerK = _easeOutCubic(cornerP);
+    if (cornerK > 0) {
+      const pad = Math.min(cw, ch) * 0.045;
+      const len = Math.min(cw, ch) * 0.045;
+      ctx.save();
+      ctx.strokeStyle = `rgba(232,255,0,${0.55 * cornerK})`;
+      ctx.lineWidth = 1.2;
+      const corners = [
+        [pad, pad, 1, 1],
+        [cw - pad, pad, -1, 1],
+        [pad, ch - pad, 1, -1],
+        [cw - pad, ch - pad, -1, -1],
+      ];
+      for (const [x, y, sx, sy] of corners) {
+        ctx.beginPath();
+        ctx.moveTo(x, y + sy * len);
+        ctx.lineTo(x, y);
+        ctx.lineTo(x + sx * len, y);
+        ctx.stroke();
+      }
+      // Tech-метки в углах
+      ctx.font = '500 9px "JetBrains Mono", monospace';
+      ctx.globalAlpha = cornerK * 0.45;
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = accent;
+      ctx.textAlign = 'left';
+      ctx.fillText('FIN.', pad + len + 8, pad + 1);
+      ctx.textAlign = 'right';
+      ctx.fillText('OUT', cw - pad - len - 8, pad + 1);
+      ctx.textBaseline = 'bottom';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = `rgba(255,255,255,${0.4 * cornerK})`;
+      ctx.fillText('SIGNAL', pad + len + 8, ch - pad);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = accent;
+      ctx.fillText('END', cw - pad - len - 8, ch - pad);
+      ctx.restore();
+    }
+
+    // ── 9. Лёгкий "lens flare" блик в правом верхнем углу ─────
+    if (p > 0.45 && p < 0.92) {
+      const flareK = Math.sin(_clamp01((p - 0.45) / 0.47) * Math.PI);  // дуга 0..1..0
+      if (flareK > 0.02) {
+        const fx = cw * 0.86, fy = ch * 0.18;
+        const fr = Math.min(cw, ch) * 0.18;
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        const fg = ctx.createRadialGradient(fx, fy, 0, fx, fy, fr);
+        fg.addColorStop(0,   `rgba(255,250,200,${0.18 * flareK})`);
+        fg.addColorStop(0.4, `rgba(232,255,0,${0.06 * flareK})`);
+        fg.addColorStop(1,   'rgba(232,255,0,0)');
+        ctx.fillStyle = fg;
+        ctx.fillRect(0, 0, cw, ch);
+        ctx.restore();
+      }
+    }
+  }
+
+  function _clamp01(v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+  function _easeOutCubic(v) { const x = 1 - v; return 1 - x * x * x; }
 
   // Принудительный сброс springs для экспорта (вызывается из ExportEngine)
   function _forceResetSprings() {
@@ -6031,10 +7450,114 @@ const BackgroundEngine = (() => {
     cam.scrollY.position = 0;
   }
 
+  /* ══ СИЛУЭТ ПЕРСОНАЖА ══════════════════════════════════════════════
+     Текст должен выстраиваться ПО ФИГУРЕ, а не по её прямоугольнику.
+     Прямоугольник — это габарит картинки, а картинка с прозрачностью почти
+     всегда уже своего габарита: у фигуры есть плечи, есть воздух над
+     головой, есть просветы сбоку. Пока полоса текста резалась по габариту,
+     набор упирался в пустоту и обрывался задолго до самой фигуры — ровно
+     то, что видно на кадре: слово кончается там, где ещё ничего нет.
+
+     Профиль строится ОДИН раз на картинку и кэшируется: читается альфа
+     уменьшенной копии, и для каждого ряда запоминается крайний непрозрачный
+     пиксель слева и справа. Дальше профиль растягивается на реальное место
+     фигуры в кадре — это дёшево и не зависит от размера оригинала.
+
+     ВАЖНО: профиль намеренно НЕ учитывает покадровую анимацию фигуры
+     (дыхание, покачивание). Раскладка текста считается каждый кадр, и если
+     кормить её дрожащими границами, текст задрожит вместе с ними. Берётся
+     статичная мизансцена строки — она и есть композиция.
+  ══════════════════════════════════════════════════════════════════ */
+  const SIL_ROWS  = 48;         // строк профиля — шаг ~2% высоты фигуры
+  const SIL_ALPHA = 24;         // порог непрозрачности (0..255)
+
+  function _buildSilhouette(img) {
+    try {
+      const W  = 96;
+      const ar = (img.naturalWidth || img.width) / (img.naturalHeight || img.height);
+      const H  = Math.max(8, Math.round(W / (ar || 1)));
+      const cv = document.createElement('canvas');
+      cv.width = W; cv.height = H;
+      const c2 = cv.getContext('2d', { willReadFrequently: true });
+      c2.drawImage(img, 0, 0, W, H);
+      const data = c2.getImageData(0, 0, W, H).data;
+      const rows = new Array(SIL_ROWS);
+      for (let r = 0; r < SIL_ROWS; r++) {
+        const y0 = Math.floor(r * H / SIL_ROWS);
+        const y1 = Math.max(y0 + 1, Math.floor((r + 1) * H / SIL_ROWS));
+        let lo = -1, hi = -1;
+        for (let y = y0; y < y1; y++) {
+          for (let x = 0; x < W; x++) {
+            if (data[(y * W + x) * 4 + 3] > SIL_ALPHA) {
+              if (lo < 0 || x < lo) lo = x;
+              if (x > hi) hi = x;
+            }
+          }
+        }
+        // Пустой ряд — фигуры на этой высоте нет вовсе.
+        rows[r] = (lo < 0) ? null : { a: lo / W, b: (hi + 1) / W };
+      }
+      return rows;
+    } catch (e) {
+      /* Картинка с чужого домена — канвас «протухает» и getImageData падает.
+         Без профиля текст просто верстается по прямоугольнику, как раньше. */
+      return null;
+    }
+  }
+
+  function _silhouetteOf(ov) {
+    if (!ov || !ov.img || !ov.img.naturalWidth) return null;
+    if (ov._silCache && ov._silSrc === ov.img.src) return ov._silCache;
+    ov._silCache = _buildSilhouette(ov.img);
+    ov._silSrc   = ov.img.src;
+    return ov._silCache;
+  }
+
+  /* Занятая фигурой полоса на заданной высоте кадра, в пикселях канваса.
+     null там, где фигуры нет: над головой, ниже обреза, в пустых рядах. */
+  function getCharacterShape(cw, ch, activeLineIdx) {
+    const imgs = overlays.filter(function(o) {
+      return o && o.type === 'image' && o.img && o.img.naturalWidth;
+    });
+    if (!imgs.length) return null;
+    const NAMED = /(герой|персонаж|char|hero|sprite|actor|model)/i;
+    const named = imgs.filter(function(o) { return NAMED.test(o.name || ''); });
+    const pool  = named.length ? named : imgs;
+    const ov = pool.reduce(function(a, o) {
+      return (o.width || 0) > (a.width || 0) ? o : a;
+    }, pool[0]);
+
+    const rows = _silhouetteOf(ov);
+    if (!rows) return null;
+
+    const lo   = (ov.lineOverrides && activeLineIdx >= 0) ? ov.lineOverrides[activeLineIdx] : null;
+    const xPct = (lo && lo.x     != null) ? lo.x     : ov.x;
+    const yPct = (lo && lo.y     != null) ? lo.y     : ov.y;
+    const wPct = (lo && lo.width != null) ? lo.width : ov.width;
+    const flip = (lo && lo.flipX != null) ? lo.flipX : ov.flipX;
+
+    const drawW = (wPct / 100) * cw;
+    const drawH = drawW / (ov.img.naturalWidth / ov.img.naturalHeight);
+    const left  = (xPct / 100) * cw - drawW / 2;
+    const top   = (yPct / 100) * ch - drawH / 2;
+
+    return function spanAt(y) {
+      const f = (y - top) / drawH;
+      if (f < 0 || f >= 1) return null;
+      const row = rows[Math.min(SIL_ROWS - 1, Math.max(0, Math.floor(f * SIL_ROWS)))];
+      if (!row) return null;
+      // Зеркалирование меняет края профиля местами.
+      const a = flip ? 1 - row.b : row.a;
+      const b = flip ? 1 - row.a : row.b;
+      return { x0: left + a * drawW, x1: left + b * drawW };
+    };
+  }
+
+
   return {
     load, draw, playVideo, stopVideo, pauseVideo,
     setFX, setCamParam, resetCamera, applyBackgroundCommand,
-    setTextDrivenCamera, clearTextDrivenCamera,
+    setTextDrivenCamera, clearTextDrivenCamera, tickTextDrivenCamera, getEffectiveTextCamera,
     registerBgImage, setLineBackground, clearLineBackground,
     getBgImageUrl, getBgImageName,
     registerOverlay, registerTextOverlay, registerFrameOverlay, registerEffectOverlay, registerCardOverlay, replaceOverlayImage, duplicateOverlay, updateOverlay, removeOverlay, moveOverlay, drawOverlays, drawOverlaysAll,
@@ -6043,11 +7566,15 @@ const BackgroundEngine = (() => {
     get effectTypes() { return EFFECT_TYPES; },
     get FrameDrawEngine() { return FrameDrawEngine; },
     measureTextOverlay, setOverlayChangeCallback,
+    getCharacterShape,
     drawFxOverlay, drawLetterboxLayer,
+    // Ending sequence
+    setEndingMarker, clearEndingMarker, getEndingMarker, getEndingState, drawEnding,
     _forceResetSprings, // для ExportEngine
     // Per-line cinematic camera scenes
     setLineCamScene, clearLineCamScene, getLineCamScene,
     tickLineScene, evaluateLineScene, applySceneTransform, applySceneFlash,
+    setForegroundCam,
     addCamScene, updateCamScene, removeCamScene, findCamSceneForLine, resetSceneFadesToDefaults,
     get camScenes()    { return camScenes; },
     get scenePresets() { return Object.keys(SCENE_PRESETS); },

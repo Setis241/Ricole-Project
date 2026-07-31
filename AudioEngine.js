@@ -3,7 +3,7 @@
    Web Audio API: decode, analyse, playback
 ═══════════════════════════════════════════════ */
 const AudioEngine = (() => {
-  let ctx, analyser, source, buffer;
+  let ctx, analyser, source, buffer, gainNode;
   let startTime = 0;
   let _isPlaying = false;
 
@@ -16,6 +16,10 @@ const AudioEngine = (() => {
     analyser.fftSize = FFT_SIZE;
     // 0.75 = хороший баланс: быстрая реакция + нет моргания
     analyser.smoothingTimeConstant = 0.75;
+    // Цепь: source → gainNode → analyser → destination
+    gainNode = ctx.createGain();
+    gainNode.gain.value = 1;
+    gainNode.connect(analyser);
     analyser.connect(ctx.destination);
     buffer = await ctx.decodeAudioData(arrayBuffer);
     return buffer.duration;
@@ -26,12 +30,25 @@ const AudioEngine = (() => {
     if (source) { try { source.stop(); } catch (e) {} }
     source = ctx.createBufferSource();
     source.buffer = buffer;
-    source.connect(analyser);
+    source.connect(gainNode || analyser);
     source.start(0, Math.max(0, offset));
     startTime = ctx.currentTime - offset;
     _isPlaying = true;
     source.onended = () => { _isPlaying = false; };
     return source;
+  }
+
+  // Плавно меняет громкость без щелчков (целевое значение 0..1)
+  function setGain(value) {
+    if (!gainNode || !ctx) return;
+    const v = Math.max(0, Math.min(1, value));
+    // Маленькая ramp для подавления щелчков
+    try {
+      gainNode.gain.cancelScheduledValues(ctx.currentTime);
+      gainNode.gain.setTargetAtTime(v, ctx.currentTime, 0.03);
+    } catch (e) {
+      gainNode.gain.value = v;
+    }
   }
 
   function stop() {
@@ -67,7 +84,7 @@ const AudioEngine = (() => {
   }
 
   return {
-    loadBuffer, play, stop, pause,
+    loadBuffer, play, stop, pause, setGain,
     getCurrentTime, getFrequencyData, getAudioDestination,
     get isPlaying()  { return _isPlaying; },
     get sampleRate() { return ctx ? ctx.sampleRate : 44100; },

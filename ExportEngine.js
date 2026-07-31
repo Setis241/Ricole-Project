@@ -258,19 +258,41 @@ const ExportEngine = (() => {
       timestampOffset = opusPreSkip;
     }
 
+    // ── ENDING fade: если задан ending.time — затухаем аудио по smoothstep ──
+    const _endMarker = (BackgroundEngine.getEndingMarker && BackgroundEngine.getEndingMarker()) || null;
+    const _endStartSec = _endMarker ? _endMarker.time : null;
+    const _endFadeSec  = _endMarker ? _endMarker.duration * (_endMarker.fadeFrac || 0.35) : 0;
+
     for (let offset = 0; offset < audioBuffer.length; offset += FRAME_SZ) {
       const sz   = Math.min(FRAME_SZ, audioBuffer.length - offset);
       const data = new Float32Array(sz * nch);
 
+      // Коэффициенты затухания на нужных сэмплах (smootherstep — совпадает с визуальным fade)
+      const _gainAt = (sampleIdx) => {
+        if (_endStartSec == null) return 1;
+        const tSec = sampleIdx / sr;
+        const dt = tSec - _endStartSec;
+        if (dt <= 0) return 1;
+        if (dt >= _endFadeSec) return 0;
+        const k = dt / _endFadeSec;
+        // smootherstep: k³·(k·(k·6-15)+10)
+        const s = k * k * k * (k * (k * 6 - 15) + 10);
+        return 1 - s;
+      };
+
       if (nch === 1) {
         const src = audioBuffer.getChannelData(0);
-        for (let i = 0; i < sz; i++) data[i] = src[offset + i] || 0;
+        for (let i = 0; i < sz; i++) {
+          const g = _gainAt(offset + i);
+          data[i] = (src[offset + i] || 0) * g;
+        }
       } else {
         const ch0 = audioBuffer.getChannelData(0);
         const ch1 = audioBuffer.getChannelData(Math.min(1, audioBuffer.numberOfChannels - 1));
         for (let i = 0; i < sz; i++) {
-          data[i * 2]     = ch0[offset + i] || 0;
-          data[i * 2 + 1] = ch1[offset + i] || 0;
+          const g = _gainAt(offset + i);
+          data[i * 2]     = (ch0[offset + i] || 0) * g;
+          data[i * 2 + 1] = (ch1[offset + i] || 0) * g;
         }
       }
 
@@ -562,6 +584,7 @@ const ExportEngine = (() => {
       let _exportAnim = null, _exportLyric = null;
       let _exportFadeA = 0, _exportFont = params.font, _exportSize = params.fontSize;
       let _exportColor = params.color, _exportPos = 'center';
+      let _exportAnchorX = null, _exportAnchorY = null;
       let _exportElapsed = 0, _exportDur = 0;
 
       if (activeIdx >= 0 && activeIdx < lyrics.length) {
@@ -576,11 +599,19 @@ const ExportEngine = (() => {
         _exportColor = _ls.color    || params.color;
         const animKey = _ls.animMode || params.animMode;
         _exportPos   = _ls.position || params.textPosition || 'center';
+        // Числовой якорь строки — см. App.js
+        _exportAnchorX = (_ls.anchorX != null) ? _ls.anchorX : null;
+        _exportAnchorY = (_ls.anchorY != null) ? _ls.anchorY : null;
         const modeFn = AnimModes[animKey] || AnimModes.pulse;
 
         const words  = _exportLyric.text
           ? _exportLyric.text.replace(/\{[^}]+\}/g, '').split(/\s+/).filter(Boolean)
           : [];
+        // Ширина колонки строки — формула обязана совпадать с App.js,
+        // иначе перенос в файле разойдётся с превью.
+        const _expAnchorX  = (_ls.anchorX != null) ? _ls.anchorX : 50;
+        const _expMaxLineW = w * (2 * Math.min(_expAnchorX, 100 - _expAnchorX) / 100) * 0.95;
+
         _exportAnim = modeFn({
           bands, t, params, springs: localSprings,
           words,
@@ -591,6 +622,7 @@ const ExportEngine = (() => {
           fontSize: _exportSize,
           ctx:      offCtx,
           font:     _exportFont,
+          maxLineW: _expMaxLineW,
         });
 
         // ── Camera override к фону (montage, drift) ──
@@ -617,11 +649,22 @@ const ExportEngine = (() => {
 
       // Тик blend сцены — независимо от источника фона (см. App.js)
       if (BackgroundEngine.tickLineScene) BackgroundEngine.tickLineScene(dt);
+      // textCam decay тикается ПОСЛЕ отрисовки фона (см. ниже).
 
       // Сценический transform поверх любого фонового рендера (как viewport-камера)
       const _exportSceneApplied = BackgroundEngine.applySceneTransform
         ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t)
         : false;
+
+      // ── ENDING: затухание контента ─────────────────────────
+      const _exportEnding = BackgroundEngine.getEndingState
+        ? BackgroundEngine.getEndingState(t)
+        : { active: false, contentAlpha: 1, audioVolume: 1 };
+      const _exportContentSaved = _exportEnding.active && _exportEnding.contentAlpha < 1;
+      if (_exportContentSaved) {
+        offCtx.save();
+        offCtx.globalAlpha = _exportEnding.contentAlpha;
+      }
 
       if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
         // Менеджер фонов: tick уже сделан выше до seek; здесь только рисуем активный entry.
@@ -634,6 +677,8 @@ const ExportEngine = (() => {
         offCtx.fillStyle = '#0a0a0a';
         offCtx.fillRect(0, 0, w, h);
       }
+      // Decay text-driven camera ПОСЛЕ отрисовки фона (matches legacy timing)
+      if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
       if (_exportSceneApplied) offCtx.restore();
 
@@ -643,6 +688,20 @@ const ExportEngine = (() => {
       }
 
       const currentLyric = _exportLyric;
+
+      // Передний план едет с той же камерой, ослабленной — см. App.js.
+      // Коэффициент обязан совпадать с App.js, иначе превью и файл разойдутся.
+      // Базовую матрицу отдаём движку по той же причине, что и в App.js:
+      // без неё объект с ov.camFollow (персонаж) поедет в экспорте иначе,
+      // чем в превью.
+      if (BackgroundEngine.setForegroundCam) {
+        BackgroundEngine.setForegroundCam(
+          (offCtx.getTransform ? offCtx.getTransform() : null), 0.28);
+      }
+      const _exportFgApplied = BackgroundEngine.applySceneTransform
+        ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t, 0.28)
+        : false;
+
       BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, () => {
         // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
         offCtx.globalAlpha = 1;
@@ -656,6 +715,8 @@ const ExportEngine = (() => {
           if (pp.endsWith('-right')) textX = w * 0.85;
           if (pp.startsWith('top'))    textY = h * 0.15;
           if (pp.startsWith('bottom')) textY = h * 0.85;
+          if (_exportAnchorX != null) textX = w * (_exportAnchorX / 100);
+          if (_exportAnchorY != null) textY = h * (_exportAnchorY / 100);
 
           const mainBottom = TextRenderer.draw(
             offCtx, _exportLyric, textX, textY,
@@ -681,8 +742,18 @@ const ExportEngine = (() => {
         offCtx.globalAlpha = 1;
       });
 
+      if (_exportFgApplied) offCtx.restore();
+
       // Letterbox поверх всего
       BackgroundEngine.drawLetterboxLayer(offCtx, w, h, bands, dt);
+
+      // Закрываем content-alpha обёртку (ending fade)
+      if (_exportContentSaved) offCtx.restore();
+
+      // ── ENDING overlay: финальная анимация прощания ────────
+      if (_exportEnding.active && BackgroundEngine.drawEnding) {
+        BackgroundEngine.drawEnding(offCtx, w, h, t);
+      }
 
       // КРИТИЧНО: Восстанавливаем состояние canvas после кадра
       offCtx.restore();

@@ -4,13 +4,37 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<title>CHROMATYPE — Кинетическая типографика</title>
-<link rel="stylesheet" href="css/main.css?v=3" />
+<title>Ricole Project — Кинетическая типографика</title>
+<link rel="stylesheet" href="css/main.css?v=20260731d" />
 </head>
 <body>
 
 <header>
-  <h1>CHROMATYPE</h1>
+  <a href="index.html" class="brand" aria-label="Ricole Project">
+    <span class="brand-mark">
+      <svg viewBox="0 0 44 40" aria-hidden="true">
+        <defs>
+          <linearGradient id="brandG" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0%"  stop-color="#e8ff00"/>
+            <stop offset="100%" stop-color="#9aa800"/>
+          </linearGradient>
+        </defs>
+        <path d="M 7 33 V 7 H 22 a 7 7 0 0 1 0 14 H 11"
+              stroke="url(#brandG)" stroke-width="2.8"
+              fill="none" stroke-linecap="square" stroke-linejoin="miter"/>
+        <path d="M 14 21 q 2.5 -4 5 0 t 5 0 t 5 0"
+              stroke="url(#brandG)" stroke-width="2"
+              fill="none" stroke-linecap="round"/>
+        <circle cx="32" cy="21" r="1.4" fill="#e8ff00" opacity="0.9"/>
+        <circle cx="36" cy="21" r="0.95" fill="#e8ff00" opacity="0.55"/>
+        <circle cx="40" cy="21" r="0.6" fill="#e8ff00" opacity="0.30"/>
+      </svg>
+    </span>
+    <span class="brand-text">
+      <span class="brand-name">Ricole<span class="brand-name-sub">Project</span></span>
+      <span class="brand-tag">KINETIC TYPOGRAPHY ENGINE · v2.6</span>
+    </span>
+  </a>
   <nav>
     <a href="index.html" class="active">Главная</a>
     <a href="timing-editor.html">Редактор</a>
@@ -358,25 +382,32 @@
 
 </div>
 
-<script src="AudioStorage.js"></script>
-<script src="LRCParser.js"></script>
-<script src="AudioEngine.js"></script>
-<script src="physics-and-anim.js"></script>
-<script src="BackgroundEngine.js"></script>
-<script src="BackgroundManagerStorage.js"></script>
-<script src="BackgroundManager.js"></script>
-<script src="renderers.js"></script>
-<script src="BoxStyles.js"></script>
-<script src="FxEditor.js"></script>
-<script src="webm-muxer.js"></script>
-<script src="ExportEngine.js"></script>
-<script src="PresetManager.js"></script>
-<script src="App.js"></script>
+<script src="AudioStorage.js?v=20260731d"></script>
+<script src="LRCParser.js?v=20260731d"></script>
+<script src="AudioEngine.js?v=20260731d"></script>
+<script src="physics-and-anim.js?v=20260731d"></script>
+<script src="BackgroundEngine.js?v=20260731d"></script>
+<script src="BackgroundManagerStorage.js?v=20260731d"></script>
+<script src="BackgroundManager.js?v=20260731d"></script>
+<script src="renderers.js?v=20260731d"></script>
+<script src="BoxStyles.js?v=20260731d"></script>
+<script src="FxEditor.js?v=20260731d"></script>
+<script src="webm-muxer.js?v=20260731d"></script>
+<script src="ExportEngine.js?v=20260731d"></script>
+<script src="PresetManager.js?v=20260731d"></script>
+<script src="FactoryPresets.js?v=20260731d"></script>
+<script src="AutoDirector.js?v=20260731d"></script>
+<script src="App.js?v=20260731d"></script>
+<script>console.log("[Ricole] сборка 20260731d");</script>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
   App.init();
-  
+
+  // Готовые стили + авто-режиссёр (кнопки в шапке)
+  if (typeof FactoryPresets !== 'undefined') FactoryPresets.buildUI();
+  if (typeof AutoDirector  !== 'undefined') AutoDirector.buildUI();
+
   // Section navigation
   const navBtns = document.querySelectorAll('.nav-btn');
   const sectionGroups = document.querySelectorAll('.section-group');

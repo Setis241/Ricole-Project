@@ -23,6 +23,9 @@ const TextRenderer = (() => {
   // Браузер сам подбирает первый доступный из цепочки по платформе.
   const EMOJI_FB = ',"Segoe UI Emoji","Apple Color Emoji","Noto Color Emoji"';
 
+  // Последний замер страховки кадра — читается из window.RicoleDebug()
+  let _diag = null;
+
   function getFadeAlpha(elapsed, duration, fadeDur) {
     const fadeIn  = Math.min(elapsed / fadeDur, 1);
     const fadeOut = duration > 0 ? Math.min((duration - elapsed) / fadeDur, 1) : 1;
@@ -49,7 +52,7 @@ const TextRenderer = (() => {
     // потом команды фона, потом метки секций — порядок решает!
     text = text
       .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POS|BGIMG|OVFX):[^}]+\}|\{LNOBOX\}/g, '') // убрать line-style теги
-      .replace(/\/[^\/]+\//g, '')                           // убрать ВСЕ /КОМАНДЫ/ включая /ZOOM IN/
+      .replace(/\/[^\/{}]+\//g, '')                         // убрать ВСЕ /КОМАНДЫ/ включая /ZOOM IN/ (скобки исключены, чтобы не съесть {/GLOW}{/BOX…})
       .trim();
     // После зачистки section-метка оказывается в начале — убираем
     text = text.replace(/^\[[^\]]+\]\s*/g, '').trim();
@@ -731,18 +734,27 @@ const TextRenderer = (() => {
       ctx.fillStyle=span.color; ctx.fillText(span.word,finalX,finalY);
 
     } else if (span.outline) {
-      ctx.strokeStyle='rgba(0,0,0,0.8)'; ctx.lineWidth=Math.max(3,size*0.08);
+      // Раньше здесь были два strokeText подряд и ни одного fillText — буквы
+      // выходили полыми, сквозь них просвечивал фон, и на любой пёстрой
+      // картинке строка разваливалась. Теперь это контур в прямом смысле:
+      // тёмная обводка отделяет букву от фона, а заливка остаётся.
+      ctx.lineJoin='round'; ctx.miterLimit=2;
+      ctx.strokeStyle='rgba(0,0,0,0.85)'; ctx.lineWidth=Math.max(3,size*0.09);
       ctx.strokeText(span.word,finalX,finalY);
-      ctx.strokeStyle=span.color; ctx.lineWidth=Math.max(2,size*0.06);
-      ctx.strokeText(span.word,finalX,finalY);
+      ctx.fillStyle=span.color; ctx.fillText(span.word,finalX,finalY);
 
     } else if (span.glow||span.neon) {
       const glowColor = span.neon ? '#b14fff' : span.color;
-      ctx.shadowColor=glowColor; ctx.shadowBlur=size*(span.neon?0.35:0.22);
+      // shadowBlur — гауссово размытие на КАЖДУЮ отрисовку, и его цена растёт
+      // квадратично от радиуса. Поэтому: ореол рисуем один раз (на обводке),
+      // заливку — уже без тени, а радиус ограничиваем сверху. Вид тот же,
+      // но проходов вдвое меньше и радиус не разрастается на крупном кегле.
+      const glowR = Math.min(span.neon ? 26 : 18, size * (span.neon ? 0.35 : 0.22));
+      ctx.shadowColor=glowColor; ctx.shadowBlur=glowR;
       ctx.strokeStyle='rgba(0,0,0,0.5)'; ctx.lineWidth=Math.max(2,size*0.05);
       ctx.strokeText(span.word,finalX,finalY);
-      ctx.fillStyle=glowColor; ctx.fillText(span.word,finalX,finalY);
       ctx.shadowBlur=0; ctx.shadowColor='transparent';
+      ctx.fillStyle=glowColor; ctx.fillText(span.word,finalX,finalY);
 
     } else {
       ctx.strokeStyle='rgba(0,0,0,0.7)'; ctx.lineWidth=Math.max(2,size*0.06);
@@ -778,6 +790,28 @@ const TextRenderer = (() => {
     const totalAlpha = (anim.alpha ?? 1) * fadeAlpha;
     if (totalAlpha <= 0.001) return;
 
+    // ── FX-стили по словам ──────────────────────────────────────────────
+    // parseSpans группирует слова по стилю; разворачиваем их в пословный
+    // массив, сохраняя FX-состояние каждого токена.
+    //
+    // ЗДЕСЬ НЕЛЬЗЯ ПРАВИТЬ РАСКЛАДКУ. Был проход, который разводил
+    // наложения прямо перед отрисовкой, и он давал ровно ту дёрганность,
+    // ради которой затевался: ширина слова зависит от его текущего
+    // анимированного масштаба, масштаб дышит на басу — значит каждый кадр
+    // получались новые зазоры, соседи разъезжались, а ряд перецентровывался
+    // целиком. Позиции обязан задавать режим, один раз и по своим правилам;
+    // рендерер только рисует. Наложения лечатся в источнике — см. отказ от
+    // {BIG} на кинетических строках в AutoDirector.
+    const rawText  = typeof lyric === 'string' ? lyric : (lyric.rawText || lyric.text || '');
+    const wordSpans = [];
+    if (!anim.perLetter) {
+      const spans = parseSpans(rawText, color, t);
+      for (const sp of spans) {
+        const ws = sp.word.split(/\s+/).filter(Boolean);
+        for (const w of ws) wordSpans.push({ ...sp, word: w });
+      }
+    }
+
     // ── Global box для word-layout ──────────────────────────────────────
     // Вычисляем bbox по всем словам с учётом их индивидуальных позиций и scale.
     // Уважаем per-line opt-out: {LNOBOX} ⇒ lyric.lineStyle.noBox=true ⇒ пропустить.
@@ -797,6 +831,9 @@ const TextRenderer = (() => {
 
         for (const wData of anim.words) {
           const wAlpha = wData.alpha ?? 1;
+          // Служебные элементы (подложка, поле-повтор) в рамку не входят:
+          // они заведомо больше набора и растянули бы её на весь кадр.
+          if (wData.ghost) continue;
           if (wAlpha < SETTLED_THRESHOLD || !wData.word || !wData.word.trim()) continue;
           const wScale    = wData.scale ?? 1;
           const wFontSize = fontSize * wScale;
@@ -829,46 +866,107 @@ const TextRenderer = (() => {
       }
     }
 
-    // ── Парсим rawText чтобы получить FX-стили для каждого слова ──
-    // parseSpans группирует слова по стилю; разворачиваем их в
-    // пословный массив, сохраняя FX-состояние каждого токена.
+    // wordSpans разобран выше — до раскладки, т.к. кегль слова влияет
+    // на то, сколько места оно занимает.
     //
     // anim.perLetter = true (режим shatter) — anim.words содержит БУКВЫ,
     // а не слова. Маппинг wordSpans[wi] сломался бы (первые N букв получили
-    // бы стили первого слова). В этом случае пропускаем парсинг FX-тегов —
+    // бы стили первого слова). В этом случае FX-теги не парсятся вовсе —
     // буквы рисуются с базовым цветом строки, без per-word FX.
-    const rawText  = typeof lyric === 'string' ? lyric : (lyric.rawText || lyric.text || '');
-    const wordSpans = [];
-    if (!anim.perLetter) {
-      const spans = parseSpans(rawText, color, t);
-      for (const sp of spans) {
-        const ws = sp.word.split(/\s+/).filter(Boolean);
-        for (const w of ws) wordSpans.push({ ...sp, word: w });
+
+    /* ══ СТРАХОВКА КАДРА ══════════════════════════════════════════════
+       Последний рубеж: здесь и только здесь известна НАСТОЯЩАЯ ширина
+       отрисовки — тем же ctx, тем же шрифтом и тем же кеглем, которыми
+       слово будет нарисовано через несколько строк.
+
+       Режимы считают раскладку по своей мере ширины и держатся полосы,
+       которую им передали. Любое расхождение между этой мерой и реальной
+       отрисовкой (начертание, обводка, фолбэк шрифта, чужая полоса) даёт
+       текст, вылезший за кадр, — и найти виновника по кадру невозможно,
+       потому что врать может любое звено цепочки.
+
+       Поэтому вместо поиска виновника — замер по факту: если набор не
+       помещается в кадр, он ужимается целиком относительно точки строки.
+       Пропорции и композиция сохраняются, теряется только размер, и то
+       ровно настолько, насколько не влезло.
+
+       Служебные элементы (ghost) в замер не входят: подложка выходит за
+       кадр НАМЕРЕННО, и подгонять кадр под неё значит убить приём. */
+    let _fit = 1;
+    {
+      /* reach — насколько далеко набор уходит от точки строки; room —
+         сколько места есть до ближайшего края кадра. Обе меры берутся от
+         ОДНОЙ точки, поэтому одного коэффициента хватает на обе стороны.
+
+         Мерить надо ТЕМ ЖЕ кеглем, которым будет рисоваться слово, включая
+         множители {BIG}/{SMALL}: иначе слово с {BIG} рисуется на 45% шире
+         замеренного и спокойно уходит за край мимо страховки.
+
+         POLE — обязательное поле кадра. Без него страховка лишь не давала
+         ВЫЙТИ за край, и буква вставала вплотную к границе — а вплотную к
+         границе выглядит точно так же сломанно, как и за ней. */
+      const POLE = canvasWidth * 0.035;
+      let si = 0, reach = 0;
+      for (const wD of anim.words) {
+        if (!wD.word || !wD.word.trim()) continue;
+        const sp = wD.ghost ? null : (wordSpans[si++] || null);
+        if (wD.ghost) continue;
+        const base = fontSize * (wD.scale ?? 1);
+        if (base < 2) continue;
+        const st  = sp ? ((sp.bold ? 'bold ' : '') + (sp.italic ? 'italic ' : '')) : '';
+        const fsz = sp && sp.big ? base * 1.45 : sp && sp.small ? base * 0.65 : base;
+        ctx.font = `${st}${fsz}px ${font}${EMOJI_FB}`;
+        reach = Math.max(reach, Math.abs(wD.x ?? 0) + ctx.measureText(wD.word).width / 2);
       }
+      const room = Math.max(8, Math.min(cx, canvasWidth - cx) - POLE);
+      if (reach > room) _fit = room / reach;
+      // Диагностика: последние ФАКТИЧЕСКИЕ числа отрисовки — их читает
+      // window.RicoleDebug(). Без них спор о том, что происходит в кадре,
+      // ведётся по скриншотам, а по скриншоту пиксель не измеришь.
+      _diag = { путь: 'пословный', cx: Math.round(cx), кадр: canvasWidth,
+                поле: Math.round(POLE), охват: Math.round(reach),
+                место: Math.round(room), ужатие: +_fit.toFixed(3) };
     }
 
     ctx.save();
     ctx.globalAlpha = totalAlpha;
 
+    /* Индекс span'а считается по НАСТОЯЩИМ словам, а не по элементам
+       раскладки. Режим вправе положить в anim.words служебные элементы —
+       подложку, поле-повтор, — и они не должны сдвигать разметку: иначе
+       {GLOW} с третьего слова уезжает на дубль, а само слово остаётся без
+       стиля. Такой элемент помечается ghost:true, рисуется базовым стилем
+       строки и в счётчике не участвует.
+
+       Именно это позволяет ставить подложку ПЕРЕД текстом в массиве, то
+       есть рисовать её ПОД ним: раньше служебные элементы приходилось
+       дописывать в хвост и они ложились поверх набора. */
+    let spanIdx = 0;
+
     for (let wi = 0; wi < anim.words.length; wi++) {
       const wData = anim.words[wi];
       if (!wData.word || !wData.word.trim()) continue;
+      const isGhost = !!wData.ghost;
+      const mySpan  = isGhost ? null : wordSpans[spanIdx++];
       const wAlpha = wData.alpha ?? 1;
       if (wAlpha <= 0.001) continue;
 
-      const wScale    = wData.scale ?? 1;
+      // Страховка кадра (см. выше) — ужимает только настоящий набор:
+      // подложка выходит за край намеренно.
+      const k         = isGhost ? 1 : _fit;
+      const wScale    = (wData.scale ?? 1) * k;
       const wRot      = wData.rotation ?? 0;
       const wFontSize = fontSize * wScale;
       if (wFontSize < 2) continue;
 
       // Берём соответствующий span (или дефолт без эффектов)
-      const span = wordSpans[wi] ?? { word: wData.word, color, bold: false, italic: false };
+      const span = mySpan ?? { word: wData.word, color, bold: false, italic: false };
       // Обновляем word на случай расхождения (напр. после чистки rawText)
       const spanForDraw = { ...span, word: wData.word };
 
       ctx.save();
       ctx.globalAlpha *= wAlpha;
-      ctx.translate(cx + wData.x, cy + wData.y);
+      ctx.translate(cx + wData.x * k, cy + wData.y * k);
       if (wRot) ctx.rotate(wRot);
 
       // Предварительно меряем ширину при нужном размере
@@ -893,6 +991,9 @@ const TextRenderer = (() => {
     // Возвращаем нижнюю границу последнего слова (для позиционирования перевода)
     let wlBottom = cy;
     for (const wData of anim.words) {
+      // Низ набора — по настоящим словам: перевод должен встать под
+      // ТЕКСТОМ, а не под подложкой, которая уходит за край кадра.
+      if (wData.ghost) continue;
       const absY = cy + (wData.y ?? 0) + fontSize * (wData.scale ?? 1) * 0.5;
       if (absY > wlBottom) wlBottom = absY;
     }
@@ -901,8 +1002,16 @@ const TextRenderer = (() => {
 
   /* ── Main draw ── */
   function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null) {
-    // lyric.text уже очищен (без /commands/, без {LFONT:...}), rawText — сырой с тегами
-    const text = typeof lyric==='string' ? lyric : (lyric.text||lyric.rawText||'');
+    // lyric.text уже очищен парсером (без /commands/, без {LFONT:...}, без empty-маркеров).
+    // НИ В КОЕМ СЛУЧАЕ не фолбэчимся на rawText — пустой text это намеренное состояние
+    // (техническая строка / маркер «(пусто)») и текст не должен рисоваться.
+    const text = typeof lyric === 'string'
+      ? lyric
+      : (lyric && typeof lyric.text === 'string' ? lyric.text : '');
+    if (!text || !text.trim()) {
+      // Пустой текст — ничего не рисуем, рамка/бокс тоже не появятся.
+      return;
+    }
     const {
       scaleX=1,scaleY=1,offsetX=0,offsetY=0,rotation=0,
       alpha=1,neonGlow=false,glowAmt=0,
@@ -920,7 +1029,9 @@ const TextRenderer = (() => {
     ctx.globalAlpha = totalAlpha;
 
     if (neonGlow && glowAmt>0.05) {
-      ctx.shadowColor=color; ctx.shadowBlur=fontSize*glowAmt*0.5;
+      // Радиус ограничен: на крупном кегле fontSize*0.5 давало ореол в
+      // десятки пикселей, а стоимость размытия растёт квадратично от радиуса.
+      ctx.shadowColor=color; ctx.shadowBlur=Math.min(22, fontSize*glowAmt*0.5);
     }
 
     const padding  = canvasWidth*0.04;
@@ -933,6 +1044,43 @@ const TextRenderer = (() => {
     const lineH    = fontSize*1.6;
     const totalH   = rows.length*lineH;
     const startY   = cy - totalH/2 + lineH/2;
+
+    /* ══ СТРАХОВКА КАДРА (построчный путь) ═══════════════════════════
+       Такая же, как в drawWordLayout, и по той же причине — но здесь она
+       нужнее. Перенос считается по maxWidth с ЗАЛОЖЕННЫМ множителем 2.2,
+       то есть по догадке о будущем масштабе. Догадка врёт всегда, когда
+       строка стоит не по центру кадра (cx смещён якорем), когда режим
+       разгоняет scaleX выше 2.2 на басу, когда {BIG} расширяет слово уже
+       после переноса или когда слово физически шире maxWidth и перенести
+       его нельзя. В любом из этих случаев строка уезжает за край целиком,
+       и в кадре остаётся одно слово — ровно та картинка, на которую
+       жалуются.
+
+       Поэтому здесь тоже замер по факту: меряем реальные ряды реальным
+       кеглем с учётом scaleX и ужимаем всё на один коэффициент. */
+    let _fitLine = 1;
+    {
+      const POLE = canvasWidth * 0.035;
+      let widest = 0;
+      for (const row of rows) {
+        let rw = 0;
+        row.forEach((sp, idx) => {
+          const spSize = sp.big ? fontSize*1.45 : sp.small ? fontSize*0.65 : fontSize;
+          const fstyle = (sp.bold ? 'bold ' : '') + (sp.italic ? 'italic ' : '');
+          ctx.font = `${fstyle}${spSize}px ${font}${EMOJI_FB}`;
+          rw += ctx.measureText(sp.word).width;
+          if (idx < row.length-1) rw += fontSize*0.35;
+        });
+        if (rw > widest) widest = rw;
+      }
+      const half = widest * Math.abs(scaleX) / 2 + Math.abs(offsetX);
+      const room = Math.max(8, Math.min(cx, canvasWidth - cx) - POLE);
+      if (half > room) _fitLine = room / half;
+      _diag = { путь: 'построчный', cx: Math.round(cx), кадр: canvasWidth,
+                поле: Math.round(POLE), охват: Math.round(half),
+                место: Math.round(room), ужатие: +_fitLine.toFixed(3),
+                масштабРежима: +Number(scaleX).toFixed(2) };
+    }
 
     // ── Global box fallback: если у строки нет своего бокса —
     //    рисуем один общий бокс под весь текст.
@@ -991,7 +1139,10 @@ const TextRenderer = (() => {
       ctx.save();
       ctx.translate(cx+offsetX,rowY);
       if (rotation) ctx.rotate(rotation);
-      ctx.scale(scaleX,scaleY);
+      // _fitLine — страховка кадра (см. выше): домножается к масштабу
+      // режима, поэтому ужимается ВСЯ строка целиком, а не отдельные слова,
+      // и композиция строки не меняется.
+      ctx.scale(scaleX*_fitLine,scaleY*_fitLine);
       ctx.translate(-(cx+offsetX),-rowY);
 
       // Начальная позиция X для строки (центрируем относительно cx без offsetX)
@@ -1085,7 +1236,7 @@ const TextRenderer = (() => {
     return bottomY;
   }
 
-  return { draw, getFadeAlpha };
+  return { draw, getFadeAlpha, get lastFrameGuard() { return _diag; } };
 })();
 
 
