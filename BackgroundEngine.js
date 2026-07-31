@@ -1154,6 +1154,17 @@ const BackgroundEngine = (() => {
   // с аудио-реактивными эффектами и настраиваемым таймлайном.
   const overlays = [];
 
+  /* Базовый отступ лирики от края кадра, доля от меньшей стороны холста.
+     0.05 ≈ привычная title-safe зона вещания; этого хватает, чтобы слово
+     не срезалось ни кропом соцсетей, ни собственным scaleX анимации. */
+  let textSafeInset = 0.05;
+  function setTextSafeInset(v) {
+    const n = +v;
+    if (!isFinite(n)) return;
+    textSafeInset = Math.min(0.25, Math.max(0, n));
+  }
+  function getTextSafeInset() { return textSafeInset; }
+
   // ── Callback-хук: вызывается после любого изменения overlays ──
   // PresetManager подключается сюда, чтобы дёргать scheduleAutosave.
   let _overlayChangeCb = null;
@@ -6115,7 +6126,14 @@ const BackgroundEngine = (() => {
   // Учитываются все включённые и видимые frame-оверлеи (берётся пересечение).
   // Если рамок нет — возвращается весь холст.
   function getTextSafeArea(cw, ch) {
-    let left = 0, top = 0, right = cw, bottom = ch;
+    /* Базовый отступ от края кадра — ВСЕГДА, даже когда рамок нет вовсе.
+       Без него зона при выключенных frame-оверлеях равна всему холсту,
+       и слова упираются прямо в край: ровно та жалоба, ради которой
+       безопасная зона и заводилась. Считается от меньшей стороны, чтобы
+       на 9:16 и 16:9 отступ читался одинаково. */
+    const baseInset = Math.min(cw, ch) * textSafeInset;
+    let left = baseInset, top = baseInset;
+    let right = cw - baseInset, bottom = ch - baseInset;
 
     for (let i = 0; i < overlays.length; i++) {
       const ov = overlays[i];
@@ -7606,7 +7624,8 @@ const BackgroundEngine = (() => {
     _previewDrawCard: (ctx, ov, cw, ch, bands, t) => _drawCardComposition(ctx, ov, cw, ch, bands, t),
     get effectTypes() { return EFFECT_TYPES; },
     get FrameDrawEngine() { return FrameDrawEngine; },
-    measureTextOverlay, setOverlayChangeCallback, getTextSafeArea,
+    measureTextOverlay, setOverlayChangeCallback,
+    getTextSafeArea, setTextSafeInset, getTextSafeInset,
     getCharacterShape,
     drawFxOverlay, drawLetterboxLayer,
     // Ending sequence

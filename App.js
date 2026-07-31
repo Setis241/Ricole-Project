@@ -225,6 +225,11 @@ const App = (() => {
         // фигуры в кадре, а не «в позицию кадра».
         if (_ls && _ls.anchorX != null) _textX = cw * (_ls.anchorX / 100);
         if (_ls && _ls.anchorY != null) _textY = ch * (_ls.anchorY / 100);
+        /* Якорь загоняем в зону здесь, а не оставляем это рендереру.
+           Рендерер и так клампит центр блока, но _maxLineW считается тут:
+           точка снаружи зоны дала бы нулевую полосу и раскладку в столбик. */
+        _textX = Math.min(Math.max(_textX, _safe.x), _safe.x + _safe.w);
+        _textY = Math.min(Math.max(_textY, _safe.y), _safe.y + _safe.h);
       }
       /* Полоса выводится из той же точки и обрезается по безопасной зоне —
          теперь и при числовом якоре, который сетку перебивает. */
@@ -550,6 +555,9 @@ const App = (() => {
       ['maxScale',  'maxScaleVal',  v => params.maxScale  = +v],
       ['fadeDur',   'fadeDurVal',   v => params.fadeDur   = +v / 1000],
       ['fontSize',  'fontSizeVal',  v => params.fontSize  = +v],
+      // Проценты в UI, доля в движке — зона живёт в BackgroundEngine,
+      // чтобы превью и ExportEngine читали одно и то же значение.
+      ['safeInset', 'safeInsetVal', v => BackgroundEngine.setTextSafeInset(+v / 100)],
     ];
     rangeMap.forEach(([id, valId, cb]) => {
       const el  = document.getElementById(id);

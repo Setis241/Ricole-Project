@@ -794,11 +794,15 @@ const TextRenderer = (() => {
     // Считаем bbox финальных позиций слов; если он шире/выше зоны —
     // сжимаем раскладку (позиции + кегль) и сдвигаем центр внутрь кадра.
     const wlArea = resolveArea(bounds, canvasWidth);
-    if (isFinite(wlArea.h) && anim.words.length) {
+
+    /* bbox раскладки при заданном кегле. Считается по фактическим позициям
+       и ширинам слов, поэтому пересчитывать его надо после КАЖДОГО сжатия:
+       позиции и ширины ужимаются разными коэффициентами. */
+    function wlBBox(words, fs) {
       let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-      for (const wData of anim.words) {
+      for (const wData of words) {
         if (!wData.word || !wData.word.trim()) continue;
-        const wFs = fontSize * (wData.scale ?? 1);
+        const wFs = fs * (wData.scale ?? 1);
         if (wFs < 2) continue;
         ctx.font = `${wFs}px ${font}${EMOJI_FB}`;
         const hw = ctx.measureText(wData.word).width / 2;
@@ -806,25 +810,53 @@ const TextRenderer = (() => {
         minX = Math.min(minX, (wData.x ?? 0) - hw); maxX = Math.max(maxX, (wData.x ?? 0) + hw);
         minY = Math.min(minY, (wData.y ?? 0) - hh); maxY = Math.max(maxY, (wData.y ?? 0) + hh);
       }
-      if (minX < Infinity) {
+      return { minX, maxX, minY, maxY };
+    }
+
+    if (isFinite(wlArea.h) && anim.words.length) {
+      let bb = wlBBox(anim.words, fontSize);
+      if (bb.minX < Infinity) {
         const padW = wlArea.w * 0.04, padH = wlArea.h * 0.04;
         const availW = Math.max(1, wlArea.w - padW*2);
         const availH = Math.max(1, wlArea.h - padH*2);
-        const k = Math.max(0.45, Math.min(1, availW / (maxX - minX || 1), availH / (maxY - minY || 1)));
-        if (k < 1) {
-          fontSize *= k;
+
+        /* Сжатие раздельное, и это принципиально. Общий коэффициент с полом
+           0.45 не давал раскладке ужаться сильнее — при большом разлёте слова
+           уезжали за холст и строка не рисовалась ВООБЩЕ. Пропавший текст
+           хуже вылезшего, поэтому:
+             позиции  — жмём насколько нужно, без пола: разлёт это фантазия
+                        режима, её не жалко;
+             кегль    — с полом 0.45, иначе слова станут нечитаемой пылью. */
+        const kFit  = Math.min(1, availW / ((bb.maxX - bb.minX) || 1),
+                                  availH / ((bb.maxY - bb.minY) || 1));
+        if (kFit < 1) {
+          fontSize *= Math.max(0.45, kFit);
           anim = { ...anim, words: anim.words.map(w => ({
-            ...w, x: (w.x ?? 0) * k, y: (w.y ?? 0) * k,
+            ...w, x: (w.x ?? 0) * kFit, y: (w.y ?? 0) * kFit,
           })) };
-          minX *= k; maxX *= k; minY *= k; maxY *= k;
+          bb = wlBBox(anim.words, fontSize);
+
+          /* Кегль ужался слабее позиций — слова могли снова распереть bbox.
+             Дожимаем одними позициями, пока не влезет. */
+          for (let i = 0; i < 4; i++) {
+            const kx = availW / ((bb.maxX - bb.minX) || 1);
+            const ky = availH / ((bb.maxY - bb.minY) || 1);
+            const k2 = Math.min(1, kx, ky);
+            if (k2 >= 0.999) break;
+            anim = { ...anim, words: anim.words.map(w => ({
+              ...w, x: (w.x ?? 0) * k2, y: (w.y ?? 0) * k2,
+            })) };
+            bb = wlBBox(anim.words, fontSize);
+          }
         }
+
         // Сдвигаем центр так, чтобы bbox целиком лежал внутри зоны
         const L = wlArea.x + padW, R = wlArea.x + wlArea.w - padW;
         const T = wlArea.y + padH, B = wlArea.y + wlArea.h - padH;
-        if (cx + minX < L) cx = L - minX;
-        if (cx + maxX > R) cx = R - maxX;
-        if (cy + minY < T) cy = T - minY;
-        if (cy + maxY > B) cy = B - maxY;
+        if (cx + bb.minX < L) cx = L - bb.minX;
+        if (cx + bb.maxX > R) cx = R - bb.maxX;
+        if (cy + bb.minY < T) cy = T - bb.minY;
+        if (cy + bb.maxY > B) cy = B - bb.maxY;
       }
     }
 
