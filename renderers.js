@@ -786,14 +786,24 @@ const TextRenderer = (() => {
      anim.words = [{ word, x, y, scale, alpha, rotation, fontScale? }]
      x,y — смещение от центра холста (cx, cy)
   ══════════════════════════════════════════════ */
-  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds) {
+  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt) {
     const totalAlpha = (anim.alpha ?? 1) * fadeAlpha;
     if (totalAlpha <= 0.001) return;
 
     // ── Вписываем word-layout в безопасную зону кадра ───────────────────
     // Считаем bbox финальных позиций слов; если он шире/выше зоны —
     // сжимаем раскладку (позиции + кегль) и сдвигаем центр внутрь кадра.
-    const wlArea = resolveArea(bounds, canvasWidth);
+    /* Маска нужна и здесь. Режим ставит слова по силуэту, но на басу они
+       разгоняются масштабом — и раскладка, честная в покое, наезжает на
+       фигуру на пике. Зона считается по фактической высоте разлёта слов. */
+    const wlAreaFull = resolveArea(bounds, canvasWidth);
+    let wlArea = wlAreaFull;
+    if (anim.words.length) {
+      const bb0 = wlBBox(anim.words, fontSize);
+      if (bb0.minX < Infinity) {
+        wlArea = maskedArea(wlAreaFull, shapeAt, cy, (bb0.maxY - bb0.minY) || fontSize * 1.6);
+      }
+    }
 
     /* bbox раскладки при заданном кегле. Считается по фактическим позициям
        и ширинам слов, поэтому пересчитывать его надо после КАЖДОГО сжатия:
@@ -988,13 +998,20 @@ const TextRenderer = (() => {
         ctx.font = `${st}${fsz}px ${font}${EMOJI_FB}`;
         reach = Math.max(reach, Math.abs(wD.x ?? 0) + ctx.measureText(wD.word).width / 2);
       }
-      const room = Math.max(8, Math.min(cx, canvasWidth - cx) - POLE);
+      /* Место — от ЗОНЫ (с маской), а не от холста. От холста страховка
+         держала слова внутри кадра и честно позволяла им лечь на фигуру:
+         на басу масштаб слов растёт, разлёт вместе с ним, и раскладка,
+         честная в покое, наезжает на спрайт на пике. */
+      const pole = Math.min(POLE, wlArea.w * 0.05);
+      const room = Math.max(8, Math.min(cx - (wlArea.x + pole),
+                                        (wlArea.x + wlArea.w - pole) - cx));
       if (reach > room) _fit = room / reach;
       // Диагностика: последние ФАКТИЧЕСКИЕ числа отрисовки — их читает
       // window.RicoleDebug(). Без них спор о том, что происходит в кадре,
       // ведётся по скриншотам, а по скриншоту пиксель не измеришь.
       _diag = { путь: 'пословный', cx: Math.round(cx), кадр: canvasWidth,
-                поле: Math.round(POLE), охват: Math.round(reach),
+                зона: Math.round(wlArea.x) + '..' + Math.round(wlArea.x + wlArea.w),
+                поле: Math.round(pole), охват: Math.round(reach),
                 место: Math.round(room), ужатие: +_fit.toFixed(3) };
     }
 
@@ -1158,7 +1175,7 @@ const TextRenderer = (() => {
 
     // ── Word Layout (kinetic per-word positioning) ──
     if (anim && anim.wordLayout && Array.isArray(anim.words)) {
-      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds);
+      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds, shapeAt);
     }
 
     const totalAlpha = alpha*fadeAlpha;
