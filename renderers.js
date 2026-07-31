@@ -796,7 +796,7 @@ const TextRenderer = (() => {
     /* Маска нужна и здесь. Режим ставит слова по силуэту, но на басу они
        разгоняются масштабом — и раскладка, честная в покое, наезжает на
        фигуру на пике. Зона считается по фактической высоте разлёта слов. */
-    const wlAreaFull = resolveArea(bounds, canvasWidth);
+    const wlAreaFull = clipToVisible(resolveArea(bounds, canvasWidth), ctx);
     let wlArea = wlAreaFull;
     if (anim.words.length) {
       const bb0 = wlBBox(anim.words, fontSize);
@@ -1097,6 +1097,46 @@ const TextRenderer = (() => {
     return { x: 0, y: 0, w: canvasWidth, h: Infinity };
   }
 
+  /* ── Видимая область при активной камере ─────────────────────────────────
+     Текст верстается в координатах холста, но камера уже наложила на
+     контекст свою матрицу: на зуме в кадр попадает не весь холст, а его
+     кусок. Зона, честная в координатах холста, при зуме припева оказывается
+     шире экрана — и строка уезжает за край, хотя формально «внутри кадра».
+
+     Берём прообраз вьюпорта: обратная матрица переводит углы экрана обратно
+     в координаты раскладки. Для зума и сдвига это точный прямоугольник; при
+     повороте берётся вписанный, то есть с запасом в свою пользу. */
+  function visibleArea(ctx) {
+    try {
+      if (!ctx.getTransform) return null;
+      const m = ctx.getTransform();
+      if (!m || typeof m.inverse !== 'function') return null;
+      const inv = m.inverse();
+      const W = ctx.canvas.width, H = ctx.canvas.height;
+      const p = [[0,0],[W,0],[0,H],[W,H]].map(function(c) {
+        const q = inv.transformPoint(new DOMPoint(c[0], c[1]));
+        return [q.x, q.y];
+      });
+      const x0 = Math.max(p[0][0], p[2][0]), x1 = Math.min(p[1][0], p[3][0]);
+      const y0 = Math.max(p[0][1], p[1][1]), y1 = Math.min(p[2][1], p[3][1]);
+      if (!(x1 > x0 && y1 > y0)) return null;
+      return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+    } catch (e) { return null; }
+  }
+
+  // Пересечение зоны с видимой областью. Вырожденный результат отбрасываем:
+  // при экстремальном зуме лучше верстать по холсту, чем по щели.
+  function clipToVisible(area, ctx) {
+    const v = visibleArea(ctx);
+    if (!v) return area;
+    const x0 = Math.max(area.x, v.x), y0 = Math.max(area.y, v.y);
+    const x1 = Math.min(area.x + area.w, v.x + v.w);
+    const y1 = Math.min(area.y + area.h, isFinite(area.h) ? area.y + area.h : v.y + v.h);
+    const yy1 = Math.min(y1, v.y + v.h);
+    if (!(x1 - x0 > 8 && yy1 - y0 > 8)) return area;
+    return { x: x0, y: y0, w: x1 - x0, h: isFinite(area.h) ? yy1 - y0 : Infinity };
+  }
+
   /* ── Маска: вычитаем из зоны силуэт персонажа ────────────────────────────
      shapeAt(y) → {x0,x1} — занятый по горизонтали кусок на высоте y
      (BackgroundEngine.getCharacterShape). До сих пор силуэт знал только
@@ -1203,7 +1243,7 @@ const TextRenderer = (() => {
        то, что видно на кадре: у головы силуэт узкий, строка меряется по
        нему и спокойно заезжает на плечи. Поэтому: черновой перенос по
        незамаскированной зоне ради высоты — и только потом настоящая маска. */
-    const areaFull = resolveArea(bounds, canvasWidth);
+    const areaFull = clipToVisible(resolveArea(bounds, canvasWidth), ctx);
     let blockH = fontSize * 1.6;
     {
       const mw0 = (areaFull.w - areaFull.w*0.04*2) / maxPossibleScale;
@@ -1229,6 +1269,19 @@ const TextRenderer = (() => {
     let totalH = rows.length*lineH;
     for (let fit = 0; fit < 8 && totalH > maxHeight && fontSize > MIN_FONT; fit++) {
       fontSize = Math.max(MIN_FONT, fontSize * Math.max(0.82, Math.sqrt(maxHeight / totalH)));
+      rows   = wrapSpans(ctx, spans, (area.w - area.w*0.04*2) / maxPossibleScale, fontSize, font);
+      lineH  = fontSize*1.6;
+      totalH = rows.length*lineH;
+    }
+
+    /* Пол MIN_FONT держит читаемость, но на сильном зуме припева видимая
+       высота меньше, чем блок способен ужаться по этому полу, — и строка
+       уезжала за экран. Обрезанный текст хуже мелкого, поэтому если после
+       подбора блок всё ещё не влезает, пол снимается. Страховка кадра тут
+       не поможет: она домножает масштаб глифов, а межстрочный интервал
+       остаётся, и высота блока не меняется. */
+    for (let fit = 0; fit < 6 && isFinite(maxHeight) && totalH > maxHeight && fontSize > 6; fit++) {
+      fontSize = Math.max(6, fontSize * Math.max(0.7, maxHeight / totalH));
       rows   = wrapSpans(ctx, spans, (area.w - area.w*0.04*2) / maxPossibleScale, fontSize, font);
       lineH  = fontSize*1.6;
       totalH = rows.length*lineH;
