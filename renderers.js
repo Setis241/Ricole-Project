@@ -1244,10 +1244,19 @@ const TextRenderer = (() => {
         if (rw > widest) widest = rw;
       }
       const half = widest * Math.abs(scaleX) / 2 + Math.abs(offsetX);
-      const room = Math.max(8, Math.min(cx, canvasWidth - cx) - POLE);
+      /* Место меряется от ЗОНЫ (area), а не от холста. От холста страховка
+         гарантировала только «не вылезло за кадр» — и честно пропускала
+         строку сквозь персонажа и под рамку: маска сужала area, но набор
+         шире area просто центровался в ней и вываливался на обе стороны.
+         Страховка — последний рубеж, значит мерить она обязана по той же
+         области, по которой считалась раскладка. */
+      const pole  = Math.min(POLE, area.w * 0.05);
+      const room  = Math.max(8, Math.min(cx - (area.x + pole),
+                                         (area.x + area.w - pole) - cx));
       if (half > room) _fitLine = room / half;
       _diag = { путь: 'построчный', cx: Math.round(cx), кадр: canvasWidth,
-                поле: Math.round(POLE), охват: Math.round(half),
+                зона: Math.round(area.x) + '..' + Math.round(area.x + area.w),
+                поле: Math.round(pole), охват: Math.round(half),
                 место: Math.round(room), ужатие: +_fitLine.toFixed(3),
                 масштабРежима: +Number(scaleX).toFixed(2) };
     }
