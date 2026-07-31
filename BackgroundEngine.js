@@ -7558,18 +7558,78 @@ const BackgroundEngine = (() => {
       }
       return rows;
     } catch (e) {
-      /* Картинка с чужого домена — канвас «протухает» и getImageData падает.
-         Без профиля текст просто верстается по прямоугольнику, как раньше. */
+      /* Канвас «протух»: getImageData на нём запрещён. На странице,
+         открытой по file://, это происходит ВСЕГДА — Chrome считает каждый
+         файл отдельным origin, и blob:-картинка оверлея пачкает канвас.
+         Раньше здесь молча возвращался null: силуэта нет, маска не
+         работает, и понять почему по кадру невозможно. Теперь — вслух. */
+      if (!_silWarned) {
+        _silWarned = true;
+        console.warn(
+          '[Ricole] Силуэт персонажа не читается: getImageData запрещён (' + e.name + ').\n' +
+          'Страница открыта по ' + location.protocol + ' — канвас «протухает», ' +
+          'маска текста работать не будет.\n' +
+          'Пробую пересобрать через data:-URL. Надёжное решение — открыть проект ' +
+          'по http:// (локальный сервер), а не двойным кликом по index.html.'
+        );
+      }
       return null;
     }
+  }
+
+  let _silWarned = false;
+
+  /* Пересборка силуэта в обход «протухшего» канваса: blob:-URL пачкает его,
+     data:-URL — никогда. Асинхронно, потому что читать файл синхронно нельзя;
+     getCharacterShape остаётся синхронной и подхватит профиль со следующего
+     кадра. Одна попытка на оверлей — если и она не вышла, текст верстается по
+     прямоугольнику, как раньше. */
+  function _retrySilhouetteViaDataURL(ov) {
+    if (ov._silRetried) return;
+    ov._silRetried = true;
+    fetch(ov.url)
+      .then(function(r) { return r.blob(); })
+      .then(function(blob) {
+        return new Promise(function(resolve, reject) {
+          const fr = new FileReader();
+          fr.onload  = function() { resolve(fr.result); };
+          fr.onerror = reject;
+          fr.readAsDataURL(blob);
+        });
+      })
+      .then(function(dataUrl) {
+        return new Promise(function(resolve, reject) {
+          const im = new Image();
+          im.onload  = function() { resolve(im); };
+          im.onerror = reject;
+          im.src = dataUrl;
+        });
+      })
+      .then(function(im) {
+        const rows = _buildSilhouette(im);
+        if (rows) {
+          ov._silCache = rows;
+          ov._silSrc   = ov.img.src;
+          console.info('[Ricole] Силуэт «' + (ov.name || ov.id) + '» пересобран через data:-URL — маска включилась.');
+        }
+      })
+      .catch(function() { /* не вышло — работаем по прямоугольнику */ });
   }
 
   function _silhouetteOf(ov) {
     if (!ov || !ov.img || !ov.img.naturalWidth) return null;
     if (ov._silCache && ov._silSrc === ov.img.src) return ov._silCache;
-    ov._silCache = _buildSilhouette(ov.img);
-    ov._silSrc   = ov.img.src;
-    return ov._silCache;
+    const rows = _buildSilhouette(ov.img);
+    if (rows) {
+      ov._silCache = rows;
+      ov._silSrc   = ov.img.src;
+      return rows;
+    }
+    /* Профиль не прочитался. Раньше сюда писался null и _silSrc, из-за чего
+       проверка кэша выше всегда промахивалась и профиль пересобирался каждый
+       кадр — впустую. */
+    if (ov.url) _retrySilhouetteViaDataURL(ov);
+    return null;
   }
 
   /* Занятая фигурой полоса на заданной высоте кадра, в пикселях канваса.

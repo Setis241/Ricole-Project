@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <title>Ricole Project — Кинетическая типографика</title>
-<link rel="stylesheet" href="css/main.css?v=20260731h" />
+<link rel="stylesheet" href="css/main.css?v=20260731i" />
 </head>
 <body>
 
@@ -390,23 +390,32 @@
 
 </div>
 
-<script src="AudioStorage.js?v=20260731h"></script>
-<script src="LRCParser.js?v=20260731h"></script>
-<script src="AudioEngine.js?v=20260731h"></script>
-<script src="physics-and-anim.js?v=20260731h"></script>
-<script src="BackgroundEngine.js?v=20260731h"></script>
-<script src="BackgroundManagerStorage.js?v=20260731h"></script>
-<script src="BackgroundManager.js?v=20260731h"></script>
-<script src="renderers.js?v=20260731h"></script>
-<script src="BoxStyles.js?v=20260731h"></script>
-<script src="FxEditor.js?v=20260731h"></script>
-<script src="webm-muxer.js?v=20260731h"></script>
-<script src="ExportEngine.js?v=20260731h"></script>
-<script src="PresetManager.js?v=20260731h"></script>
-<script src="FactoryPresets.js?v=20260731h"></script>
-<script src="AutoDirector.js?v=20260731h"></script>
-<script src="App.js?v=20260731h"></script>
-<script>console.log("[Ricole] сборка 20260731d");</script>
+<script src="AudioStorage.js?v=20260731i"></script>
+<script src="LRCParser.js?v=20260731i"></script>
+<script src="AudioEngine.js?v=20260731i"></script>
+<script src="physics-and-anim.js?v=20260731i"></script>
+<script src="BackgroundEngine.js?v=20260731i"></script>
+<script src="BackgroundManagerStorage.js?v=20260731i"></script>
+<script src="BackgroundManager.js?v=20260731i"></script>
+<script src="renderers.js?v=20260731i"></script>
+<script src="BoxStyles.js?v=20260731i"></script>
+<script src="FxEditor.js?v=20260731i"></script>
+<script src="webm-muxer.js?v=20260731i"></script>
+<script src="ExportEngine.js?v=20260731i"></script>
+<script src="PresetManager.js?v=20260731i"></script>
+<script src="FactoryPresets.js?v=20260731i"></script>
+<script src="AutoDirector.js?v=20260731i"></script>
+<script src="App.js?v=20260731i"></script>
+<script>
+  /* Версия берётся из ?v= самого тега, а не пишется руками: захардкоженная
+     строка врала при каждом бампе и заставляла искать кэш там, где его нет. */
+  console.log("[Ricole] сборка " +
+    ((document.querySelector('script[src*="App.js"]') || {}).src || '').split('?v=')[1] +
+    " · протокол " + location.protocol +
+    (location.protocol === 'file:'
+      ? " — канвас «протухает», маска силуэта может не работать; открой по http://"
+      : ""));
+</script>
 
 <script>
 document.addEventListener('DOMContentLoaded', () => {
