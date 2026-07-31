@@ -173,6 +173,8 @@ const App = (() => {
     // Где строка реально стоит. Считается один раз (см. ниже) и используется
     // и для ширины полосы, и для отрисовки.
     let _textX = 0, _textY = 0;
+    // Безопасная зона кадра: и сетка позиций, и bounds для TextRenderer.
+    let _safe = { x: 0, y: 0, w: cw, h: ch };
 
     if (activeIdx >= 0 && activeIdx < lyrics.length) {
       _lyric   = lyrics[activeIdx];
@@ -206,19 +208,30 @@ const App = (() => {
          полоса выводится из неё. Дальше эта же _textX/_textY уходит в
          отрисовку — двух источников правды о том, где стоит строка, быть
          не должно. */
-      _textX = cw / 2; _textY = ch / 2;
+      /* Сетка отсчитывается от ВНУТРЕННЕЙ области кадра, а не от холста:
+         иначе 0.15 ширины — это точка под линией рамки. */
+      _safe = BackgroundEngine.getTextSafeArea
+        ? BackgroundEngine.getTextSafeArea(cw, ch)
+        : { x: 0, y: 0, w: cw, h: ch };
+
+      _textX = _safe.x + _safe.w / 2; _textY = _safe.y + _safe.h / 2;
       {
         const p = _effectivePos || 'center';
-        if (p.endsWith('-left'))  _textX = cw * 0.15;
-        if (p.endsWith('-right')) _textX = cw * 0.85;
-        if (p.startsWith('top'))    _textY = ch * 0.15;
-        if (p.startsWith('bottom')) _textY = ch * 0.85;
+        if (p.endsWith('-left'))  _textX = _safe.x + _safe.w * 0.15;
+        if (p.endsWith('-right')) _textX = _safe.x + _safe.w * 0.85;
+        if (p.startsWith('top'))    _textY = _safe.y + _safe.h * 0.15;
+        if (p.startsWith('bottom')) _textY = _safe.y + _safe.h * 0.85;
         // Числовой якорь перебивает сетку: он ставит строку относительно
         // фигуры в кадре, а не «в позицию кадра».
         if (_ls && _ls.anchorX != null) _textX = cw * (_ls.anchorX / 100);
         if (_ls && _ls.anchorY != null) _textY = ch * (_ls.anchorY / 100);
       }
-      const _maxLineW = 2 * Math.min(_textX, cw - _textX) * 0.95;
+      /* Полоса выводится из той же точки и обрезается по безопасной зоне —
+         теперь и при числовом якоре, который сетку перебивает. */
+      const _maxLineW = 2 * Math.min(
+        Math.max(_textX - _safe.x, 0),
+        Math.max(_safe.x + _safe.w - _textX, 0)
+      ) * 0.95;
 
       /* Силуэт фигуры для этой строки. Режим получает не прямоугольник, а
          функцию «что занято на этой высоте» и строит набор по ФОРМЕ: над
@@ -379,17 +392,19 @@ const App = (() => {
       if (_lyric && _animResult) {
         // 9-позиционная сетка: top/center/bottom × left/center/right
         /* Позиция уже посчитана до раскладки — там же, где из неё выведена
-           ширина полосы (_maxLineW). Считать её здесь второй раз значит
-           завести второй источник правды: именно так полоса и разошлась с
-           фактическим местом строки. */
+           ширина полосы (_maxLineW) и где сетка отсчитана от безопасной
+           зоны. Считать её здесь второй раз значит завести второй источник
+           правды: именно так полоса и разошлась с фактическим местом
+           строки. */
         const textX = _textX, textY = _textY;
+        const safe = _safe;  // та же зона уходит в TextRenderer как bounds
 
         const mainBottom = TextRenderer.draw(
           ctx, _lyric,
           textX, textY,
           _animResult, _fadeA,
           _effectiveColor, _effectiveFont, _effectiveSize, cw, t,
-          params.globalBoxId
+          params.globalBoxId, safe
         );
 
         // ── Перевод строки ──────────────────────
@@ -402,7 +417,8 @@ const App = (() => {
             ctx, { text: _lyric.translation },
             textX, trY,
             trAnim, _fadeA,
-            params.translationColor, _effectiveFont, trSize, cw, t
+            params.translationColor, _effectiveFont, trSize, cw, t,
+            null, safe
           );
         }
       }

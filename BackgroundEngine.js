@@ -6109,6 +6109,47 @@ const BackgroundEngine = (() => {
     }
   }
 
+  // ── Безопасная зона для лирики (внутренняя область кадра/рамок) ──────────
+  // Возвращает прямоугольник {x,y,w,h} в пикселях холста, внутри которого
+  // текст гарантированно не наезжает на линии рамки и её декор.
+  // Учитываются все включённые и видимые frame-оверлеи (берётся пересечение).
+  // Если рамок нет — возвращается весь холст.
+  function getTextSafeArea(cw, ch) {
+    let left = 0, top = 0, right = cw, bottom = ch;
+
+    for (let i = 0; i < overlays.length; i++) {
+      const ov = overlays[i];
+      if (!ov || !ov.enabled || ov.type !== 'frame') continue;
+      // Рамка полностью выцвела (scope=timeline вне диапазона) — не ограничивает текст
+      if ((ov.fadeAlpha || 0) < 0.05 || (ov.opacity != null && ov.opacity < 0.05)) continue;
+      const styleId = ov.frameStyle;
+      if (styleId === 'none' || styleId === '') continue;
+
+      // Те же величины, что и в FrameDrawEngine.draw
+      const pad = (ov.framePad ?? 0) / 100;
+      const th  = (ov.frameThickness ?? 3) * (ch / 1080);
+      const mg  = Math.min(cw, ch) * pad;
+      // Отступ внутрь: сама линия рамки + запас на её декор (углы, скобки, точки)
+      const inset = mg + th * 3 + Math.min(cw, ch) * 0.035;
+
+      left   = Math.max(left,   inset);
+      top    = Math.max(top,    inset);
+      right  = Math.min(right,  cw - inset);
+      bottom = Math.min(bottom, ch - inset);
+    }
+
+    // Защита от вырожденной зоны (очень толстая рамка / большой framePad)
+    const minW = cw * 0.30, minH = ch * 0.20;
+    if (right - left < minW) {
+      const c = cw / 2; left = c - minW / 2; right = c + minW / 2;
+    }
+    if (bottom - top < minH) {
+      const c = ch / 2; top = c - minH / 2; bottom = c + minH / 2;
+    }
+
+    return { x: left, y: top, w: right - left, h: bottom - top };
+  }
+
   // ── Offscreen буфер для chromatic ───────────
   let offscreen = null, offCtx = null;
 
@@ -7565,7 +7606,7 @@ const BackgroundEngine = (() => {
     _previewDrawCard: (ctx, ov, cw, ch, bands, t) => _drawCardComposition(ctx, ov, cw, ch, bands, t),
     get effectTypes() { return EFFECT_TYPES; },
     get FrameDrawEngine() { return FrameDrawEngine; },
-    measureTextOverlay, setOverlayChangeCallback,
+    measureTextOverlay, setOverlayChangeCallback, getTextSafeArea,
     getCharacterShape,
     drawFxOverlay, drawLetterboxLayer,
     // Ending sequence

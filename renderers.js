@@ -786,9 +786,47 @@ const TextRenderer = (() => {
      anim.words = [{ word, x, y, scale, alpha, rotation, fontScale? }]
      x,y — смещение от центра холста (cx, cy)
   ══════════════════════════════════════════════ */
-  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId) {
+  function drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds) {
     const totalAlpha = (anim.alpha ?? 1) * fadeAlpha;
     if (totalAlpha <= 0.001) return;
+
+    // ── Вписываем word-layout в безопасную зону кадра ───────────────────
+    // Считаем bbox финальных позиций слов; если он шире/выше зоны —
+    // сжимаем раскладку (позиции + кегль) и сдвигаем центр внутрь кадра.
+    const wlArea = resolveArea(bounds, canvasWidth);
+    if (isFinite(wlArea.h) && anim.words.length) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+      for (const wData of anim.words) {
+        if (!wData.word || !wData.word.trim()) continue;
+        const wFs = fontSize * (wData.scale ?? 1);
+        if (wFs < 2) continue;
+        ctx.font = `${wFs}px ${font}${EMOJI_FB}`;
+        const hw = ctx.measureText(wData.word).width / 2;
+        const hh = wFs * 0.6;
+        minX = Math.min(minX, (wData.x ?? 0) - hw); maxX = Math.max(maxX, (wData.x ?? 0) + hw);
+        minY = Math.min(minY, (wData.y ?? 0) - hh); maxY = Math.max(maxY, (wData.y ?? 0) + hh);
+      }
+      if (minX < Infinity) {
+        const padW = wlArea.w * 0.04, padH = wlArea.h * 0.04;
+        const availW = Math.max(1, wlArea.w - padW*2);
+        const availH = Math.max(1, wlArea.h - padH*2);
+        const k = Math.max(0.45, Math.min(1, availW / (maxX - minX || 1), availH / (maxY - minY || 1)));
+        if (k < 1) {
+          fontSize *= k;
+          anim = { ...anim, words: anim.words.map(w => ({
+            ...w, x: (w.x ?? 0) * k, y: (w.y ?? 0) * k,
+          })) };
+          minX *= k; maxX *= k; minY *= k; maxY *= k;
+        }
+        // Сдвигаем центр так, чтобы bbox целиком лежал внутри зоны
+        const L = wlArea.x + padW, R = wlArea.x + wlArea.w - padW;
+        const T = wlArea.y + padH, B = wlArea.y + wlArea.h - padH;
+        if (cx + minX < L) cx = L - minX;
+        if (cx + maxX > R) cx = R - maxX;
+        if (cy + minY < T) cy = T - minY;
+        if (cy + maxY > B) cy = B - maxY;
+      }
+    }
 
     // ── FX-стили по словам ──────────────────────────────────────────────
     // parseSpans группирует слова по стилю; разворачиваем их в пословный
@@ -1000,8 +1038,33 @@ const TextRenderer = (() => {
     return wlBottom;
   }
 
+  /* ── Безопасная зона кадра ──────────────────────────────────────────
+     bounds = {x,y,w,h} — внутренняя область рамки (BackgroundEngine.getTextSafeArea).
+     Если не передана — работаем по всему холсту, как раньше. */
+  function resolveArea(bounds, canvasWidth) {
+    if (bounds && bounds.w > 0 && bounds.h > 0) {
+      return { x: bounds.x || 0, y: bounds.y || 0, w: bounds.w, h: bounds.h };
+    }
+    return { x: 0, y: 0, w: canvasWidth, h: Infinity };
+  }
+
+  // Максимальная ширина строки среди rows при данном размере шрифта
+  function rowsMaxWidth(ctx, rows, baseFontSize, font) {
+    const WORD_GAP = baseFontSize * 0.35;
+    let maxW = 0;
+    rows.forEach(row => {
+      let rw = 0;
+      row.forEach((sp, idx) => {
+        rw += measureSpan(ctx, sp, baseFontSize, font).width;
+        if (idx < row.length - 1) rw += WORD_GAP;
+      });
+      if (rw > maxW) maxW = rw;
+    });
+    return maxW;
+  }
+
   /* ── Main draw ── */
-  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null) {
+  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null) {
     // lyric.text уже очищен парсером (без /commands/, без {LFONT:...}, без empty-маркеров).
     // НИ В КОЕМ СЛУЧАЕ не фолбэчимся на rawText — пустой text это намеренное состояние
     // (техническая строка / маркер «(пусто)») и текст не должен рисоваться.
@@ -1019,7 +1082,7 @@ const TextRenderer = (() => {
 
     // ── Word Layout (kinetic per-word positioning) ──
     if (anim && anim.wordLayout && Array.isArray(anim.words)) {
-      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId);
+      return drawWordLayout(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds);
     }
 
     const totalAlpha = alpha*fadeAlpha;
@@ -1034,15 +1097,54 @@ const TextRenderer = (() => {
       ctx.shadowColor=color; ctx.shadowBlur=Math.min(22, fontSize*glowAmt*0.5);
     }
 
-    const padding  = canvasWidth*0.04;
+    // ── Раскладка внутри безопасной зоны кадра ──────────────────────────
+    // area — внутренняя область рамки (или весь холст, если рамок нет).
+    // Перенос строк, авто-уменьшение шрифта и клампинг центра считаются
+    // относительно неё, поэтому куплет не вылезает за пределы кадра.
+    const area     = resolveArea(bounds, canvasWidth);
+    const padding  = area.w*0.04;
     // Учитываем максимальный возможный scaleX (обычно до 2.2x), чтобы текст не вылезал за границы
     // но при этом не перестраивался во время анимации
     const maxPossibleScale = 2.2;
-    const maxWidth = (canvasWidth - padding*2) / maxPossibleScale;
+    const maxWidth = (area.w - padding*2) / maxPossibleScale;
     const spans    = parseSpans(text, color, t);
-    const rows     = wrapSpans(ctx, spans, maxWidth, fontSize, font);
-    const lineH    = fontSize*1.6;
-    const totalH   = rows.length*lineH;
+
+    // Подбор размера: если строк столько, что блок не влезает в высоту зоны —
+    // уменьшаем шрифт (до 45% от исходного) и переносим заново.
+    const MIN_FONT = Math.max(8, fontSize * 0.45);
+    // По вертикали анимации растягивают текст слабее, чем по горизонтали
+    const VERT_SCALE_RESERVE = 1.15;
+    const maxHeight = isFinite(area.h)
+      ? (area.h - area.h*0.04*2) / VERT_SCALE_RESERVE
+      : Infinity;
+
+    let rows   = wrapSpans(ctx, spans, maxWidth, fontSize, font);
+    let lineH  = fontSize*1.6;
+    let totalH = rows.length*lineH;
+    for (let fit = 0; fit < 8 && totalH > maxHeight && fontSize > MIN_FONT; fit++) {
+      fontSize = Math.max(MIN_FONT, fontSize * Math.max(0.82, Math.sqrt(maxHeight / totalH)));
+      rows   = wrapSpans(ctx, spans, (area.w - area.w*0.04*2) / maxPossibleScale, fontSize, font);
+      lineH  = fontSize*1.6;
+      totalH = rows.length*lineH;
+    }
+
+    // Клампим центр блока, чтобы он целиком оставался внутри зоны
+    const blockW = rowsMaxWidth(ctx, rows, fontSize, font);
+    const halfW  = blockW/2 + padding*0.5;
+    if (area.w > halfW*2) {
+      cx = Math.min(Math.max(cx, area.x + halfW), area.x + area.w - halfW);
+    } else {
+      cx = area.x + area.w/2;
+    }
+    const halfH = totalH/2;
+    if (isFinite(area.h)) {
+      if (area.h > halfH*2) {
+        cy = Math.min(Math.max(cy, area.y + halfH), area.y + area.h - halfH);
+      } else {
+        cy = area.y + area.h/2;
+      }
+    }
+
     const startY   = cy - totalH/2 + lineH/2;
 
     /* ══ СТРАХОВКА КАДРА (построчный путь) ═══════════════════════════
@@ -1227,7 +1329,7 @@ const TextRenderer = (() => {
     if (anim && anim._scrollDupe) {
       const { dx, dy } = anim._scrollDupe;
       const animDupe = { ...anim, offsetX: offsetX + dx, offsetY: offsetY + dy, _scrollDupe: null };
-      draw(ctx, lyric, cx, cy, animDupe, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId);
+      draw(ctx, lyric, cx, cy, animDupe, fadeAlpha, color, font, fontSize, canvasWidth, t, globalBoxId, bounds);
     }
 
     // Возвращаем реальную нижнюю границу текста в canvas-координатах.

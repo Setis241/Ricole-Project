@@ -708,20 +708,26 @@ const ExportEngine = (() => {
 
         if (_exportLyric && _exportAnim) {
           // 9-позиционная сетка: см. App.js
-          let textX = w / 2;
-          let textY = h / 2;
+          // Сетка — относительно внутренней области кадра (см. App.js)
+          const safe = BackgroundEngine.getTextSafeArea
+            ? BackgroundEngine.getTextSafeArea(w, h)
+            : { x: 0, y: 0, w, h };
+
+          let textX = safe.x + safe.w / 2;
+          let textY = safe.y + safe.h / 2;
           const pp = _exportPos || 'center';
-          if (pp.endsWith('-left'))  textX = w * 0.15;
-          if (pp.endsWith('-right')) textX = w * 0.85;
-          if (pp.startsWith('top'))    textY = h * 0.15;
-          if (pp.startsWith('bottom')) textY = h * 0.85;
+          if (pp.endsWith('-left'))  textX = safe.x + safe.w * 0.15;
+          if (pp.endsWith('-right')) textX = safe.x + safe.w * 0.85;
+          if (pp.startsWith('top'))    textY = safe.y + safe.h * 0.15;
+          if (pp.startsWith('bottom')) textY = safe.y + safe.h * 0.85;
+          // Числовой якорь перебивает сетку — как и в превью (App.js)
           if (_exportAnchorX != null) textX = w * (_exportAnchorX / 100);
           if (_exportAnchorY != null) textY = h * (_exportAnchorY / 100);
 
           const mainBottom = TextRenderer.draw(
             offCtx, _exportLyric, textX, textY,
             _exportAnim, _exportFadeA,
-            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId
+            _exportColor, _exportFont, _exportSize, w, t, params.globalBoxId, safe
           );
 
           // ── Перевод строки ──────────────────────────
@@ -733,7 +739,8 @@ const ExportEngine = (() => {
               offCtx, { text: _exportLyric.translation },
               textX, trY,
               trAnim, _exportFadeA,
-              params.translationColor || '#999999', _exportFont, trSize, w, t
+              params.translationColor || '#999999', _exportFont, trSize, w, t,
+              null, safe
             );
           }
         }
