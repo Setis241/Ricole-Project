@@ -161,7 +161,18 @@ const LRCParser = (() => {
   // Поддерживается несколько форм: (пусто), (empty), —, ---, ... и т.д.
   const EMPTY_MARKERS = /^(\(пусто\)|\(empty\)|\(нет\)|\(none\)|—|–|-{2,}|\.{3,})$/i;
   function _stripIfEmptyMarker(s) {
-    if (s && EMPTY_MARKERS.test(s.trim())) return '';
+    if (!s) return s;
+    /* Маркер проверяем БЕЗ словесных тегов.
+
+       Сравнивалась строка целиком, а маркер приезжает завёрнутым:
+       и FX-редактор, и режиссура вешают эффект на всю строку, и из
+       «(пусто)» выходит «{NEON}(пусто){/NEON}». Такая строка маркером
+       уже не считалась — она становилась обычным текстом, и в кадр
+       во весь экран печаталось слово «(пусто)» вместо инструментальной
+       паузы. Скобки тегов к содержанию строки отношения не имеют, и
+       на распознавание маркера влиять не должны. */
+    const bare = s.replace(/\{[^}]*\}/g, '').trim();
+    if (EMPTY_MARKERS.test(bare)) return '';
     return s;
   }
 
@@ -255,5 +266,14 @@ const LRCParser = (() => {
       .join('\n');
   }
 
-  return { parse, serialize, extractBackgroundCommands, extractLineStyle, extractTranslation, isEndingMarker };
+  /* Публично — чтобы у «пустой строки» был ОДИН источник правды.
+     Режиссура тоже собирает строки и не должна заводить свой список
+     маркеров: разойдутся — и половина кода снова начнёт считать
+     «(пусто)» текстом. */
+  function isEmptyMarker(s) {
+    return !!s && EMPTY_MARKERS.test(String(s).replace(/\{[^}]*\}/g, '').trim());
+  }
+
+  return { parse, serialize, extractBackgroundCommands, extractLineStyle, extractTranslation,
+           isEndingMarker, isEmptyMarker };
 })();

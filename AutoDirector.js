@@ -1316,6 +1316,14 @@ const AutoDirector = (function() {
          «[Pre-Chorus]» уезжало в кадр как обычное слово — да ещё получало
          акцентный эффект и рамку наравне с текстом песни. */
       main = main.replace(/^\s*\[[^\]]+\]\s*/, '').trim();
+      /* Маркер пустой строки — не текст, а указание «здесь ничего не
+         показывать». Партитура собирает `main` из СЫРОЙ строки, где
+         маркер лежит как есть, и дальше вешала на него словесный эффект:
+         из «(пусто)» выходило «{GLOW}(пусто){/GLOW}», и слово ехало в
+         кадр во весь экран. Гасим здесь же — источник правды один,
+         в LRCParser. */
+      if (typeof LRCParser !== 'undefined' && LRCParser.isEmptyMarker &&
+          LRCParser.isEmptyMarker(main)) main = '';
       const transl = sep === -1 ? '' : stripped.slice(sep + 3).trim();
       const hasTr  = !!transl;
 
