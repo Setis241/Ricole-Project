@@ -1004,6 +1004,8 @@ const AutoDirector = (function() {
   }
 
   /* Собирает готовый LRC-текст с тегами и командами. */
+  const INTRO_SECTION_RE = /^(вступление|интро|intro)$/i;
+
   function buildScore(audio, lyr, sections, opts) {
     opts = opts || {};
     /* Сцена приходит вторым проходом: чтобы её посчитать, нужны габариты
@@ -1474,6 +1476,33 @@ const AutoDirector = (function() {
       boxByLine[l.index] = { pos: pos, frac: Math.max(0, Math.min(1, frac)), anim: anim };
       out.push({ time: l.time, rawText: content, text: l.text });
     });
+
+    /* ── РАМКА КЛИПА В САМОМ ТЕКСТЕ ──────────────────────────────
+       Вступление и финал ставились ТОЛЬКО в движок — то есть нигде не
+       были видны. В партитуре не появлялось ни строчки: ни [Вступление],
+       ни [конец], хотя все остальные решения режиссуры лежат в тексте и
+       правятся руками. Отсюда и «нигде не проставлено»: работа шла, а
+       предъявить её было нечем, и подвинуть карточку тоже.
+
+       Теперь рамка пишется в партитуру строками-метками. Строка без
+       текста — она инструментальная, в кадр не попадает (markerOnly), а
+       [конец] вдобавок РАБОЧИЙ: LRCParser поднимает по нему isEnding, и
+       прощание живёт уже от текста, а не от невидимого состояния движка.
+
+       Повторный прогон метки не удваивает: свой [конец] не ставим, если
+       он в тексте уже есть (в том числе поставленный автором — его время
+       вообще не наше дело). */
+    const fr = opts.framing || null;
+    if (fr && fr.intro) {
+      const hasIntro = lyr.lines.some(function(l) {
+        return l.entry && l.entry.section && INTRO_SECTION_RE.test(l.entry.section);
+      });
+      if (!hasIntro) out.push({ time: fr.intro.start, rawText: '[Вступление]', text: '' });
+    }
+    if (fr && fr.ending && fr.ending.source !== 'marker') {
+      const hasEnd = lyr.lines.some(function(l) { return l.entry && l.entry.isEnding; });
+      if (!hasEnd) out.push({ time: fr.ending.time, rawText: '[конец]', text: '' });
+    }
 
     return {
       lrc: LRCParser.serialize(out),
@@ -2373,15 +2402,18 @@ const AutoDirector = (function() {
        Каждый следующий слой строится на предыдущем. Раньше все три
        считались независимо и совпадали только по таймкодам — отсюда и
        ощущение трёх отдельных видео, наложенных друг на друга. */
+    /* Рамка клипа считается ДО партитуры: её метки ([Вступление], [конец])
+       уходят строками в сам текст, значит партитура должна их уже знать.
+       Структура для этого готова — проигрыш в начале размечен секцией
+       'intro' ещё в buildStructure. */
+    const framing    = planFraming(audio, lyr, sections, false);
     // 1-й проход — габариты строк; 2-й — партитура, знающая мизансцену.
     const probe      = buildScore(audio, lyr, sections, { bg: bg });
     const stage      = planStage(sections, lyr, bg, probe.boxes);
-    const score      = buildScore(audio, lyr, sections, { bg: bg, stage: stage });
+    const score      = buildScore(audio, lyr, sections,
+                                  { bg: bg, stage: stage, framing: framing });
     const character  = planCharacter(sections, lyr, bg, false, stage);
     const camera     = planCamera(sections, lyr, bg, false, character.plan);
-    // Рамка клипа — вступление и прощание. Считается от той же структуры,
-    // что и всё остальное: проигрыш в начале уже размечен секцией 'intro'.
-    const framing    = planFraming(audio, lyr, sections, false);
 
     return { audio: audio, lyrics: lyr, sections: sections, bg: bg,
              score: score, camera: camera, character: character,
