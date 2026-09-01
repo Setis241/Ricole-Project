@@ -703,11 +703,6 @@ const ExportEngine = (() => {
       if (BackgroundEngine.tickLineScene) BackgroundEngine.tickLineScene(dt);
       // textCam decay тикается ПОСЛЕ отрисовки фона (см. ниже).
 
-      // Сценический transform поверх любого фонового рендера (как viewport-камера)
-      const _exportSceneApplied = BackgroundEngine.applySceneTransform
-        ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t)
-        : false;
-
       // ── ENDING: затухание контента ─────────────────────────
       const _exportEnding = BackgroundEngine.getEndingState
         ? BackgroundEngine.getEndingState(t)
@@ -717,11 +712,21 @@ const ExportEngine = (() => {
         ? BackgroundEngine.getIntroState(t)
         : { active: false, contentAlpha: 1 };
       const _exportFrameAlpha = _exportEnding.contentAlpha * _exportIntro.contentAlpha;
+
+      /* Порядок save() тот же, что в превью, и по той же причине: стек
+         canvas снимается строго LIFO, а сцена уходит раньше прозрачности.
+         Сохранённая второй, прозрачность снималась бы вместо сцены, и весь
+         передний план рендерился бы внутри камеры сцены. */
       const _exportContentSaved = _exportFrameAlpha < 1;
       if (_exportContentSaved) {
         offCtx.save();
         offCtx.globalAlpha = _exportFrameAlpha;
       }
+
+      // Сценический transform поверх любого фонового рендера (как viewport-камера)
+      const _exportSceneApplied = BackgroundEngine.applySceneTransform
+        ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t)
+        : false;
 
       if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
         // Менеджер фонов: tick уже сделан выше до seek; здесь только рисуем активный entry.

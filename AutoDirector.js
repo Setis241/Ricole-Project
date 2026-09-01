@@ -2202,17 +2202,29 @@ const AutoDirector = (function() {
     let d = null;
 
     if (endStart == null && lastSung) {
-      // Отзвук последней строки: прощание вступает на музыкальном шве,
-      // а не обрывает её хвост.
-      const earliest = lastSung.end + (solidBpm ? Math.min(bar, 2.0) : 1.0);
-      if (dur - earliest >= FRAME_MIN_TAIL) {
+      /* Отзвук последней строки: прощание вступает на музыкальном шве, а
+         не обрывает её хвост.
+
+         Считаем от ВРЕМЕНИ последней строки, а не от её `end`. `end` —
+         это предел показа (строка не висит дольше шести секунд), и на
+         последней строке он всегда упирается в этот потолок. Из-за него
+         хвост трека «съедался» шестью секундами показа, условия на музыку
+         после текста не выполнялось почти никогда, и автоматический финал
+         не ставился ни на одном реальном треке. */
+      const read     = Math.min(5, Math.max(2, lastSung.dur || 4));
+      const earliest = lastSung.time + read + (solidBpm ? Math.min(bar, 2.0) : 1.0);
+      if (dur - lastSung.time >= FRAME_MIN_TAIL + read) {
         /* Прощание живёт в КОНЦЕ трека, а не сразу за последним словом.
            Если после текста осталось полминуты музыки, карточка, начатая
            тут же, успевает догореть до чёрного задолго до конца — дальше
            играет трек над пустым чёрным кадром. Поэтому цель — накрыть
            последние d секунд, а шов после строки работает нижней границей:
            раньше него не начинаем никогда. */
-        d = fitBars(Math.min(wantEnd, Math.max(FRAME_END_MIN, dur - earliest)));
+        /* Карточке разрешено доигрывать ПОСЛЕ конца трека — экспорт на это
+           досняли хвостом. Поэтому длительность берём задуманную, а не
+           обрезаем её остатком музыки: обрезка и была вторым источником
+           «финала нет» — оставшихся секунд не хватало на минимум. */
+        d = fitBars(wantEnd);
         endStart = Math.max(earliest, dur - d);
       }
     }
@@ -2258,6 +2270,15 @@ const AutoDirector = (function() {
          должны стартовать раньше песни и в превью, и в экспорте. */
       if (typeof AudioEngine !== 'undefined' && AudioEngine.setLeadIn) {
         AudioEngine.setLeadIn(out.intro ? out.intro.leadIn : 0);
+      }
+      /* Хвост после песни — сколько прощание доигрывает за концом трека.
+         Без него превью гаснет на последнем сэмпле и конца финала не
+         показывает, хотя в файле он есть. */
+      if (typeof AudioEngine !== 'undefined' && AudioEngine.setTailHold) {
+        const tail = out.ending
+          ? Math.max(0, (out.ending.time + out.ending.duration + 0.4) - dur)
+          : 0;
+        AudioEngine.setTailHold(tail);
       }
       if (BackgroundEngine.setEndingMarker) {
         if (out.ending) {

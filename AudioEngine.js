@@ -13,6 +13,12 @@ const AudioEngine = (() => {
      Ниже по цепочке ничего чинить не надо: поиск активной строки идёт по
      `t >= line.time`, и до нуля активной строки просто нет. */
   let _leadIn = 0;
+  /* Хвост ПОСЛЕ песни. Прощальная карточка доигрывает дольше трека, а
+     превью раньше умирало ровно на последнем сэмпле: конца финала в нём
+     было не увидеть вовсе — то самое «концовка обрывается», только уже в
+     редакторе. Часы идут от контекста и после конца буфера, поэтому
+     достаточно не гасить флаг сразу. */
+  let _tailHold = 0;
 
   const FFT_SIZE = 1024; // 512 бинов
 
@@ -44,7 +50,20 @@ const AudioEngine = (() => {
     source.start(ctx.currentTime + delay, Math.max(0, offset));
     startTime = ctx.currentTime + delay - offset;
     _isPlaying = true;
-    source.onended = () => { _isPlaying = false; };
+    /* onended вешаем на КОНКРЕТНЫЙ источник и гасим флаг только если этот
+       источник всё ещё текущий. Иначе перемотка ломала воспроизведение:
+       stop() старого источника вызывает его onended уже ПОСЛЕ старта
+       нового, и флаг гас у только что запущенного — часы вставали, кадр
+       замирал, а звук шёл. */
+    const mine = source;
+    mine.onended = () => {
+      if (source !== mine) return;
+      if (_tailHold > 0) {
+        setTimeout(function() { if (source === mine) _isPlaying = false; }, _tailHold * 1000);
+      } else {
+        _isPlaying = false;
+      }
+    };
     return source;
   }
 
@@ -74,6 +93,8 @@ const AudioEngine = (() => {
 
   function setLeadIn(sec) { _leadIn = Math.max(0, sec || 0); }
   function getLeadIn()      { return _leadIn; }
+  function setTailHold(sec) { _tailHold = Math.max(0, sec || 0); }
+  function getTailHold()    { return _tailHold; }
 
   function getCurrentTime() {
     if (!_isPlaying || !ctx) return _leadIn ? -_leadIn : 0;
@@ -98,7 +119,7 @@ const AudioEngine = (() => {
 
   return {
     loadBuffer, play, stop, pause, setGain,
-    setLeadIn, getLeadIn,
+    setLeadIn, getLeadIn, setTailHold, getTailHold,
     getCurrentTime, getFrequencyData, getAudioDestination,
     get isPlaying()  { return _isPlaying; },
     get sampleRate() { return ctx ? ctx.sampleRate : 44100; },

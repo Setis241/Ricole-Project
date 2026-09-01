@@ -354,13 +354,6 @@ const App = (() => {
     // setTextDrivenCamera({k=1}) → draw читает k=1 (как в legacy drawMedia),
     // и только потом decay для следующего кадра.
 
-    // Оборачиваем рендер фона сценическим transform (если активна кам-сцена).
-    // Эффект применяется ОДИНАКОВО и к BackgroundManager, и к BackgroundEngine,
-    // как viewport-камера поверх любого фонового рендера.
-    const _sceneApplied = BackgroundEngine.applySceneTransform
-      ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t)
-      : false;
-
     // ── ENDING SEQUENCE: получаем состояние затухания и громкости ──
     const endingState = BackgroundEngine.getEndingState
       ? BackgroundEngine.getEndingState(t)
@@ -376,11 +369,32 @@ const App = (() => {
       ? BackgroundEngine.getIntroState(t)
       : { active: false, contentAlpha: 1 };
     const _frameAlpha = endingState.contentAlpha * introState.contentAlpha;
+
+    /* ПОРЯДОК ЭТИХ ДВУХ save() КРИТИЧЕН.
+
+       Обёртка прозрачности кадра ОБЯЗАНА лечь на стек РАНЬШЕ сценического
+       transform: снимаются они в обратном порядке (сцена — сразу после
+       фона, прозрачность — в самом конце кадра), а стек canvas работает
+       строго LIFO. Пока прозрачность сохранялась второй, restore() сцены
+       снимал ЕЁ, и весь передний план — текст, оверлеи, леттербокс —
+       дорисовывался внутри камеры сцены: кадр выглядел наглухо зумнутым,
+       а текста в нём не было вовсе.
+
+       Раньше это не всплывало только потому, что обёртка включалась одна
+       на весь клип — в финале, где кадр и так уходит в чёрное. Вступление
+       включает её с первой секунды, и скрытая ошибка стала видимой сразу. */
     const _contentSaved = _frameAlpha < 1;
     if (_contentSaved) {
       ctx.save();
       ctx.globalAlpha = _frameAlpha;
     }
+
+    // Оборачиваем рендер фона сценическим transform (если активна кам-сцена).
+    // Эффект применяется ОДИНАКОВО и к BackgroundManager, и к BackgroundEngine,
+    // как viewport-камера поверх любого фонового рендера.
+    const _sceneApplied = BackgroundEngine.applySceneTransform
+      ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t)
+      : false;
 
     if (BackgroundManager.hasEntries) {
       // Менеджер фонов: тикаем + рисуем активный entry с per-bg настройками
