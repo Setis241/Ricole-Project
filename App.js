@@ -429,13 +429,23 @@ const App = (() => {
           const trSize = Math.max(14, Math.round(_effectiveSize * params.translationRatio));
           const trY    = (mainBottom ?? textY + _effectiveSize) + trSize * 0.9;
           const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
-          // Перевод следует за основным текстом по X (та же горизонтальная позиция)
+          /* Перевод встаёт в ТУ ЖЕ колонку, что и основная строка, а не
+             раскладывается заново по всей безопасной зоне. Колонку и центр
+             отдаёт сам рендерер (lastLayout) — после маски и клампинга,
+             то есть там, где строка реально стоит. Маску переводу второй
+             раз считать нельзя: у него своя высота и свой кегль, профиль
+             фигуры на его высоте другой, и половины набора разъезжаются. */
+          /* Колонка годится только если основной набор в этом кадре
+               действительно рисовался: при пустом тексте или нулевой
+               альфе draw выходит раньше, и lastLayout остался от прошлой
+               строки. */
+            const lay = (mainBottom != null) ? TextRenderer.lastLayout : null;
           TextRenderer.draw(
             ctx, { text: _lyric.translation },
-            textX, trY,
+            (lay ? lay.cx : textX), trY,
             trAnim, _fadeA,
             params.translationColor, _effectiveFont, trSize, cw, t,
-            null, safe, _shapeAt
+            null, (lay ? lay.area : safe), (lay ? null : _shapeAt)
           );
         }
       }

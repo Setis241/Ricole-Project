@@ -744,12 +744,18 @@ const ExportEngine = (() => {
             const trSize = Math.max(14, Math.round(_exportSize * (params.translationRatio || 0.40)));
             const trY    = (mainBottom ?? textY + _exportSize) + trSize * 0.9;
             const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
+            // Та же колонка, что у основной строки — см. App.js и lastLayout.
+            /* Колонка годится только если основной набор в этом кадре
+               действительно рисовался: при пустом тексте или нулевой
+               альфе draw выходит раньше, и lastLayout остался от прошлой
+               строки. */
+            const lay = (mainBottom != null) ? TextRenderer.lastLayout : null;
             TextRenderer.draw(
               offCtx, { text: _exportLyric.translation },
-              textX, trY,
+              (lay ? lay.cx : textX), trY,
               trAnim, _exportFadeA,
               params.translationColor || '#999999', _exportFont, trSize, w, t,
-              null, safe, _expShape
+              null, (lay ? lay.area : safe), (lay ? null : _expShape)
             );
           }
         }
