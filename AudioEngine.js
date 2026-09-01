@@ -6,6 +6,13 @@ const AudioEngine = (() => {
   let ctx, analyser, source, buffer, gainNode;
   let startTime = 0;
   let _isPlaying = false;
+  /* Доснятое время ПЕРЕД песней. Клип с карточкой вступления должен
+     начинаться раньше трека: на песнях, где вокал идёт с первой секунды,
+     иначе титру просто негде встать. Источник стартует позже, а часы
+     уходят в минус — то есть отрицательное время это и есть вступление.
+     Ниже по цепочке ничего чинить не надо: поиск активной строки идёт по
+     `t >= line.time`, и до нуля активной строки просто нет. */
+  let _leadIn = 0;
 
   const FFT_SIZE = 1024; // 512 бинов
 
@@ -31,8 +38,11 @@ const AudioEngine = (() => {
     source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(gainNode || analyser);
-    source.start(0, Math.max(0, offset));
-    startTime = ctx.currentTime - offset;
+    /* Задержку даём только при старте с начала. Resume с середины — это
+       продолжение уже идущего клипа, вступление там давно позади. */
+    const delay = (offset > 0) ? 0 : _leadIn;
+    source.start(ctx.currentTime + delay, Math.max(0, offset));
+    startTime = ctx.currentTime + delay - offset;
     _isPlaying = true;
     source.onended = () => { _isPlaying = false; };
     return source;
@@ -62,8 +72,11 @@ const AudioEngine = (() => {
     return offset; // возвращает позицию для resume
   }
 
+  function setLeadIn(sec) { _leadIn = Math.max(0, sec || 0); }
+  function getLeadIn()      { return _leadIn; }
+
   function getCurrentTime() {
-    if (!_isPlaying || !ctx) return 0;
+    if (!_isPlaying || !ctx) return _leadIn ? -_leadIn : 0;
     return ctx.currentTime - startTime;
   }
 
@@ -85,6 +98,7 @@ const AudioEngine = (() => {
 
   return {
     loadBuffer, play, stop, pause, setGain,
+    setLeadIn, getLeadIn,
     getCurrentTime, getFrequencyData, getAudioDestination,
     get isPlaying()  { return _isPlaying; },
     get sampleRate() { return ctx ? ctx.sampleRate : 44100; },

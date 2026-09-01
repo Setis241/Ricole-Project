@@ -1004,7 +1004,10 @@ const AutoDirector = (function() {
   }
 
   /* Собирает готовый LRC-текст с тегами и командами. */
-  const INTRO_SECTION_RE = /^(вступление|интро|intro)$/i;
+  /* Без \b: в JS граница слова считается по ASCII, и после кириллического
+     «Вступление» её попросту нет — проверка «метка уже стоит» всегда была
+     бы ложной, а метка удваивалась бы на каждом прогоне. */
+  const INTRO_SECTION_RE = /^\s*(вступление|интро|intro)\s*$/i;
 
   function buildScore(audio, lyr, sections, opts) {
     opts = opts || {};
@@ -1423,7 +1426,23 @@ const AutoDirector = (function() {
       if (main && box) main = '{' + box + '}' + main + '{/' + box + '}';
       if (main && !box) tags.push('{LNOBOX}');   // глобальная рамка не лезет туда, где не нужна
 
-      const content = (cmds.length ? cmds.join('') + ' ' : '') +
+      /* Метка секции возвращается в строку.
+
+         Она вырезается из `main` выше — и правильно, в кадр ей нельзя.
+         Но вырезалась она НАСОВСЕМ: партитура собирается из команд, тегов
+         и текста, метки среди них нет, и «применить партитуру» вычищало
+         из лирики всю структурную разметку разом — и [Припев] с
+         [Pre-Chorus], которые расставил автор, и [конец], по которому
+         живёт прощание. Первый прогон ещё выглядел прилично (метки просто
+         пропадали), а второй прогон уже не находил ни секций, ни финала:
+         режиссура стирала собственный вход.
+
+         Ставится метка ПЕРЕД командами, как её и пишут руками: cleanText в
+         LRCParser снимает её якорем ^, то есть только в самом начале
+         строки. */
+      const secLabel = (l.entry && l.entry.section) ? '[' + l.entry.section + '] ' : '';
+      const content = secLabel +
+                      (cmds.length ? cmds.join('') + ' ' : '') +
                       (main ? tags.join('') + ' ' : '') + main +
                       (hasTr ? ' >>> ' + transl : '');
 
@@ -1497,7 +1516,15 @@ const AutoDirector = (function() {
       const hasIntro = lyr.lines.some(function(l) {
         return l.entry && l.entry.section && INTRO_SECTION_RE.test(l.entry.section);
       });
-      if (!hasIntro) out.push({ time: fr.intro.start, rawText: '[Вступление]', text: '' });
+      /* Время метки прижимаем к нулю. Начало карточки уходит в минус,
+         когда вступление доснято перед песней, а формат LRC отрицательного
+         времени не знает вовсе: [-1:-8.-28] — это не «раньше нуля», это
+         мусор в тексте. Ноль здесь и правдив: клип действительно
+         открывается вступлением, а сколько его доснято — дело
+         воспроизведения, а не разметки. */
+      if (!hasIntro) {
+        out.push({ time: Math.max(0, fr.intro.start), rawText: '[Вступление]', text: '' });
+      }
     }
     if (fr && fr.ending && fr.ending.source !== 'marker') {
       const hasEnd = lyr.lines.some(function(l) { return l.entry && l.entry.isEnding; });
@@ -2080,22 +2107,30 @@ const AutoDirector = (function() {
     const introSec = sections && sections.length && sections[0].type === 'intro'
       ? sections[0] : null;
     const first = sung[0];
-    if (first && first.time >= FRAME_MIN_LEAD && (!sections || !sections.length || introSec)) {
-      const lead = first.time;
+    if (first) {
+      /* Сколько места есть СВОИМИ силами — проигрыш до первого слова.
+         Его может не быть вовсе: на песнях, где вокал идёт с первой
+         секунды, поставить титр физически некуда, и раньше режиссура
+         просто отказывалась от вступления. Отказываться нечестно: клипу
+         вступление нужно независимо от того, оставил ли его трек.
+         Недостающее ДОСНИМАЕТСЯ — видео начинается раньше песни
+         (leadIn), и карточка играет на этом времени. */
+      const natural = first.time;
       /* Передача — на долю. Кадр должен раскрыться ровно на сильном
          месте перед строкой, а не «незадолго до». На неизвестном темпе
          остаётся четверть секунды: этого хватает, чтобы первое слово
          пришло уже в чистый кадр. */
-      const handoff = solidBpm
-        ? Math.min(beat, lead * 0.25)
-        : Math.min(0.35, lead * 0.25);
+      const handoff = solidBpm ? beat : 0.35;
 
       /* Сколько держать титр. Громкий проигрыш — это уже сама песня, и
          карточка в нём лишняя: держим коротко и уходим. Тихий вступительный
          эмбиент карточку несёт — она в нём и есть событие. */
-      const e    = audio ? audio.energyAt(0, lead) : 0.5;
+      const e    = audio ? audio.energyAt(0, Math.max(natural, 4)) : 0.5;
       const want = e > 0.62 ? 6.0 : (e < 0.32 ? FRAME_MAX_LEAD : 9.0);
-      let   hold = Math.min(want, lead - handoff, FRAME_MAX_LEAD);
+      let   hold = Math.min(want, FRAME_MAX_LEAD);
+      // Своего места хватает — карточка живёт в проигрыше и ничего
+      // досниматься не просит.
+      if (natural - handoff >= hold) hold = Math.min(hold, natural - handoff);
       /* Целое число тактов — карточка живёт в размере трека, а не поперёк.
          Округление именно ВНИЗ: вверх карточка залезла бы за собственный
          предел и за начало трека. (Округление к ближайшему здесь молча не
@@ -2113,16 +2148,24 @@ const AutoDirector = (function() {
          перед началом — это не выдержка, это ощущение, что видео
          подвисло. Длинный остаток оставляем как есть — там пауза
          работает. */
-      const gapBefore = lead - handoff - hold;
+      const gapBefore = natural - handoff - hold;
       const swallowed = gapBefore > 0 && gapBefore <= 3;
       if (swallowed) hold += gapBefore;
 
+      /* Начало карточки. Уходит в минус ровно на столько, сколько своего
+         места не хватило: отрицательное время клипа — это и есть доснятое
+         вступление, песня по-прежнему начинается в нуле. */
+      const start  = natural - handoff - hold;
+      const leadIn = Math.max(0, -start);
+
       if (hold >= FRAME_MIN_LEAD) {
         out.intro = {
-          start:   Math.max(0, first.time - handoff - hold),
+          start:   start,
+          leadIn:  leadIn,
           end:     first.time - handoff,
           handoff: handoff,
           hold:    hold,
+          natural: natural,
           energy:  e,
           /* Кратность тактам теряется, когда карточка забрала остаток и
              встала в самое начало клипа. Это не потеря: на долю обязано
@@ -2210,6 +2253,11 @@ const AutoDirector = (function() {
         } else if (BackgroundEngine.clearIntroMarker) {
           BackgroundEngine.clearIntroMarker();
         }
+      }
+      /* Доснятое время — свойство ВОСПРОИЗВЕДЕНИЯ, а не карточки: часы
+         должны стартовать раньше песни и в превью, и в экспорте. */
+      if (typeof AudioEngine !== 'undefined' && AudioEngine.setLeadIn) {
+        AudioEngine.setLeadIn(out.intro ? out.intro.leadIn : 0);
       }
       if (BackgroundEngine.setEndingMarker) {
         if (out.ending) {

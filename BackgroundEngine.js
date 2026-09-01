@@ -7357,8 +7357,12 @@ const BackgroundEngine = (() => {
   function setIntroMarker(startTime, endTime, opts = {}) {
     if (startTime == null || endTime == null) { intro.start = intro.end = null; return; }
     const handoff = opts.handoff == null ? 0.35 : opts.handoff;
-    const e = Math.max(0, endTime - handoff);
-    let   s = Math.max(0, startTime);
+    const e = endTime - handoff;
+    /* Начало НЕ прижимается к нулю: отрицательное время — это доснятое
+       перед песней вступление (см. AudioEngine.setLeadIn). Прижимая его,
+       мы бы молча выбрасывали ровно то место, ради которого его и
+       досняли. */
+    let   s = startTime;
     if (e - s < (opts.minLead == null ? intro.minLead : opts.minLead)) {
       intro.start = intro.end = null;   // слишком короткий проигрыш
       return;

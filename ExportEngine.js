@@ -208,7 +208,7 @@ const ExportEngine = (() => {
   }
 
   /* ── Аудио-энкодер ───────────────────────── */
-  async function encodeAudio(audioBuffer, abr, muxer) {
+  async function encodeAudio(audioBuffer, abr, muxer, leadInSec) {
     if (typeof AudioEncoder === 'undefined') {
       console.warn('AudioEncoder недоступен, аудио пропущено');
       return;
@@ -256,6 +256,30 @@ const ExportEngine = (() => {
       silenceFrame.close();
       // Сдвигаем все реальные timestamp'ы вперёд на длину тишины
       timestampOffset = opusPreSkip;
+    }
+
+    /* ── Доснятое вступление ───────────────────────────────────────────
+       Видео начинается раньше песни, значит песню в файле надо на столько
+       же отодвинуть. Отодвигаем НАСТОЯЩЕЙ тишиной, а не одним лишь
+       сдвигом меток: дорожка, которая просто стартует с середины файла,
+       у части плееров едет или не играет вовсе. */
+    const _leadSamples = Math.max(0, Math.round((leadInSec || 0) * sr));
+    for (let off = 0; off < _leadSamples; off += FRAME_SZ) {
+      const sz = Math.min(FRAME_SZ, _leadSamples - off);
+      const silence = new AudioData({
+        format:           'f32',
+        sampleRate:       sr,
+        numberOfFrames:   sz,
+        numberOfChannels: nch,
+        timestamp:        Math.floor((timestampOffset / sr) * 1_000_000),
+        data:             new Float32Array(sz * nch),
+      });
+      encoder.encode(silence);
+      silence.close();
+      timestampOffset += sz;
+      while (encoder.encodeQueueSize > 20) {
+        await new Promise(r => setTimeout(r, 0));
+      }
     }
 
     // ── ENDING fade: если задан ending.time — затухаем аудио по smoothstep ──
@@ -376,7 +400,13 @@ const ExportEngine = (() => {
     const _endTail = _endM
       ? Math.max(0, (_endM.time + _endM.duration + 0.4) - audioBuffer.duration)
       : 0;
-    const duration    = audioBuffer.duration + _endTail;
+    /* Доснятое вступление: видео начинается РАНЬШЕ песни. Время клипа на
+       этом куске отрицательное — песня по-прежнему стартует в нуле, а
+       кадры до нуля и есть карточка. */
+    const _leadIn = (typeof AudioEngine !== 'undefined' && AudioEngine.getLeadIn)
+      ? AudioEngine.getLeadIn() : 0;
+    const _leadFrames = Math.round(_leadIn * fps);
+    const duration    = _leadIn + audioBuffer.duration + _endTail;
     const totalFrames = Math.ceil(duration * fps);
     const sr          = audioBuffer.sampleRate;
     const nch         = Math.min(audioBuffer.numberOfChannels, 2);
@@ -499,10 +529,11 @@ const ExportEngine = (() => {
         await tick();
       }
 
-      const t        = fi * dt;
-      // На хвосте после конца аудио спектра уже нет — держим тишину,
-      // иначе analyze() падает на undefined.
-      const freqData = freqFrames[fi] || _silentFreq;
+      // Время КЛИПА: до нуля идёт доснятое вступление.
+      const t        = (fi - _leadFrames) * dt;
+      /* Спектр есть только там, где есть песня: до нуля её ещё нет, за
+         концом уже нет. Держим тишину, иначе analyze() падает на undefined. */
+      const freqData = (fi >= _leadFrames ? freqFrames[fi - _leadFrames] : null) || _silentFreq;
       const bands    = localBands.analyze(freqData, sr, 1024, dt);
 
       let newIdx = -1;
@@ -561,7 +592,9 @@ const ExportEngine = (() => {
       // Видео-фон: seek с ожиданием каждые N кадров для точной синхронизации
       // Между seek'ами браузер сам движет currentTime при drawImage
       if (isBgVideo && bgMedia.readyState >= 2) {
-        const targetT = t;
+        // На доснятом вступлении время клипа отрицательное — фоновое
+        // видео там просто стоит на первом кадре, отматывать некуда.
+        const targetT = Math.max(0, t);
         const drift = Math.abs(bgMedia.currentTime - targetT);
         // Принудительный seek если дрейф > половины кадра или каждые 2 секунды
         if (drift > dt * 0.5 || fi % (fps * 2) === 0) {
@@ -577,9 +610,10 @@ const ExportEngine = (() => {
         const actVids = BackgroundManager._activeVideos();
         for (const { video } of actVids) {
           if (video.readyState >= 2) {
-            const drift = Math.abs(video.currentTime - t);
+            const vt = Math.max(0, t);
+            const drift = Math.abs(video.currentTime - vt);
             if (drift > dt * 0.5 || fi % (fps * 2) === 0) {
-              video.currentTime = t;
+              video.currentTime = vt;
               if (drift > dt * 3) await new Promise(r => { const s = () => { video.removeEventListener('seeked', s); r(); }; video.addEventListener('seeked', s); });
             }
           }
@@ -800,6 +834,9 @@ const ExportEngine = (() => {
       // КРИТИЧНО: Восстанавливаем состояние canvas после кадра
       offCtx.restore();
 
+      // Метка кадра идёт от НАЧАЛА ФАЙЛА (fi), а не от времени клипа:
+      // muxer отрицательных timestamp'ов не принимает, а песня в файле
+      // отодвинута ровно на ту же тишину (см. encodeAudio).
       const vf = new VideoFrame(offCanvas, {
         timestamp: Math.round(fi * 1_000_000 / fps),
         duration:  Math.round(1_000_000 / fps),
@@ -819,7 +856,7 @@ const ExportEngine = (() => {
 
     setProgress(90, 'Кодирование звука…');
     await tick();
-    await encodeAudio(audioBuffer, abr, muxer);
+    await encodeAudio(audioBuffer, abr, muxer, _leadIn);
 
     setProgress(97, 'Упаковка WebM…');
     await tick();

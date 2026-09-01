@@ -516,12 +516,16 @@ const App = (() => {
       spCtx.fillRect(i * barW, H - bh, barW - 1, bh);
     }
 
-    // Time
-    const m  = Math.floor(t / 60);
-    const s  = Math.floor(t % 60);
-    const ms = Math.floor((t % 1) * 1000);
+    /* Время. До нуля идёт доснятое вступление — там песня ещё не
+       началась, и часы показывают обратный отсчёт со знаком минус, а не
+       выкрученные по модулю минуты и секунды. */
+    const neg = t < 0;
+    const at  = Math.abs(t);
+    const m  = Math.floor(at / 60);
+    const s  = Math.floor(at % 60);
+    const ms = Math.floor((at % 1) * 1000);
     document.getElementById('timeDisplay').textContent =
-      `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
+      `${neg ? '-' : ''}${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(ms).padStart(3,'0')}`;
   }
 
   /* ── LYRIC LIST ────────────────────────────── */
@@ -594,8 +598,11 @@ const App = (() => {
   /* Аудио может быть ещё не загружено — тогда за название сходит первая
      секционная метка, а если нет и её, вступление идёт без титра
      (черта, уголки и раскрытие кадра всё равно отрабатывают). */
+  const _FRAMING_LABEL = /^\s*(вступление|интро|intro|конец|финал|end|ending|outro|finale)\s*$/i;
   function _titleFromLyrics() {
-    const sec = lyrics.find(l => l.section);
+    // Метки самой рамки за название не годятся: «ВСТУПЛЕНИЕ» в титре
+    // вступления — это подпись к подписи, а не имя трека.
+    const sec = lyrics.find(l => l.section && !_FRAMING_LABEL.test(l.section));
     return sec ? String(sec.section).toUpperCase() : '';
   }
 
