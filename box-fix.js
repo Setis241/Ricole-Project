@@ -43,7 +43,8 @@
       function parseSpansDynamic(text, baseColor, t) {
         // Убираем line-style теги и команды
         text = text
-          .replace(/\{L(?:FONT|SIZE|ANIM|COLOR):[^}]+\}/g, '')
+          // Синхронно с LRCParser.LINE_STYLE_RE.
+          .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|POSX|POSY|POS|LAYER|OVFX|BGIMG|NOBOX):[^}]+\}|\{LNOBOX\}/g, '')
           .replace(/\/[^\/]+\//g, '')
           .trim();
         text = text.replace(/^\[[^\]]+\]\s*/g, '').trim();

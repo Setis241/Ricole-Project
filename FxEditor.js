@@ -174,7 +174,9 @@ const FxEditor = (() => {
   ];
 
   // ── Regex for line-style tags ────────────────
-  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|POS|LAYER|OVFX|BGIMG):[^}]+\}|\{LNOBOX\}/g;
+  // Список синхронизирован с LRCParser.LINE_STYLE_RE — POSX/POSY здесь
+  // не было, и позиционные теги показывались в редакторе как текст строки.
+  const LINE_STYLE_RE = /\{L(?:FONT|SIZE|ANIM|COLOR|POSX|POSY|POS|LAYER|OVFX|BGIMG):[^}]+\}|\{LNOBOX\}/g;
 
   // ── Camera scene presets (для UI вкладки СЦЕНЫ) ──
   // Сгруппированы по характеру эффекта. В UI рисуются как сетка с заголовками.

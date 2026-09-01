@@ -315,7 +315,12 @@ const TextRenderer = (() => {
     // ВАЖНО: сначала убираем line-style теги {LFONT/LSIZE/LANIM/LCOLOR/LLAYER/LOVFX},
     // потом команды фона, потом метки секций — порядок решает!
     text = text
-      .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POS|BGIMG|OVFX):[^}]+\}|\{LNOBOX\}/g, '') // убрать line-style теги
+      /* Список ОБЯЗАН совпадать с LRCParser.LINE_STYLE_RE. Здесь не было
+         POSX/POSY — а режиссура ставит {LPOSX:…}, когда в кадре есть спрайт
+         (строка встаёт в полосу, оставленную фигурой). Тег не снимался и
+         уезжал в кадр как обычное слово: на клипах со спрайтом прямо поверх
+         текста печаталось «{LPOSX:40.8}». */
+      .replace(/\{L(?:FONT|SIZE|ANIM|COLOR|LAYER|POSX|POSY|POS|BGIMG|OVFX):[^}]+\}|\{LNOBOX\}/g, '')
       .replace(/\/[^\/{}]+\//g, '')                         // убрать ВСЕ /КОМАНДЫ/ включая /ZOOM IN/ (скобки исключены, чтобы не съесть {/GLOW}{/BOX…})
       .trim();
     /* После зачистки section-метка оказывается в начале — убираем.
