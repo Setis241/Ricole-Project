@@ -364,7 +364,19 @@ const ExportEngine = (() => {
 
     const { w, h, fps, vbr, abr } = preset;
     const dt          = 1 / fps;
-    const duration    = audioBuffer.duration;
+    /* Длительность видео = аудио + хвост прощальной анимации.
+
+       Раньше видео резалось ровно по аудио, и если [конец] стоял близко к
+       концу трека (а он там и стоит — это КОНЕЦ), карточка прощания
+       обрывалась на полуслове: файл заканчивался где-то на титре, до
+       закрытия кадра дело не доходило вовсе. Отсюда и ощущение, что
+       концовки нет. Досняли хвост: звук уже отработал своё затухание,
+       кадр досматривает финал и уходит в чёрное. */
+    const _endM   = (BackgroundEngine.getEndingMarker && BackgroundEngine.getEndingMarker()) || null;
+    const _endTail = _endM
+      ? Math.max(0, (_endM.time + _endM.duration + 0.4) - audioBuffer.duration)
+      : 0;
+    const duration    = audioBuffer.duration + _endTail;
     const totalFrames = Math.ceil(duration * fps);
     const sr          = audioBuffer.sampleRate;
     const nch         = Math.min(audioBuffer.numberOfChannels, 2);
@@ -477,6 +489,10 @@ const ExportEngine = (() => {
     setProgress(5, `Рендер кадров…`);
     await tick();
 
+    // Тишина для кадров хвоста (после конца аудио): длина берётся из
+    // реального кадра спектра, чтобы analyze() получил привычный размер.
+    const _silentFreq = new Uint8Array((freqFrames[0] && freqFrames[0].length) || 1024);
+
     for (let fi = 0; fi < totalFrames; fi++) {
       if (fi % TICK_INTERVAL === 0) {
         setProgress(5 + Math.round(fi / totalFrames * 78), `Кадр ${fi} / ${totalFrames}`);
@@ -484,7 +500,9 @@ const ExportEngine = (() => {
       }
 
       const t        = fi * dt;
-      const freqData = freqFrames[fi];
+      // На хвосте после конца аудио спектра уже нет — держим тишину,
+      // иначе analyze() падает на undefined.
+      const freqData = freqFrames[fi] || _silentFreq;
       const bands    = localBands.analyze(freqData, sr, 1024, dt);
 
       let newIdx = -1;
@@ -660,10 +678,15 @@ const ExportEngine = (() => {
       const _exportEnding = BackgroundEngine.getEndingState
         ? BackgroundEngine.getEndingState(t)
         : { active: false, contentAlpha: 1, audioVolume: 1 };
-      const _exportContentSaved = _exportEnding.active && _exportEnding.contentAlpha < 1;
+      // ── INTRO: вступление приглушает клип и раскрывает его к первой строке
+      const _exportIntro = BackgroundEngine.getIntroState
+        ? BackgroundEngine.getIntroState(t)
+        : { active: false, contentAlpha: 1 };
+      const _exportFrameAlpha = _exportEnding.contentAlpha * _exportIntro.contentAlpha;
+      const _exportContentSaved = _exportFrameAlpha < 1;
       if (_exportContentSaved) {
         offCtx.save();
-        offCtx.globalAlpha = _exportEnding.contentAlpha;
+        offCtx.globalAlpha = _exportFrameAlpha;
       }
 
       if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
@@ -766,7 +789,10 @@ const ExportEngine = (() => {
       // Закрываем content-alpha обёртку (ending fade)
       if (_exportContentSaved) offCtx.restore();
 
-      // ── ENDING overlay: финальная анимация прощания ────────
+      // ── INTRO / ENDING overlay: карточки вступления и прощания ────────
+      if (_exportIntro.active && BackgroundEngine.drawIntro) {
+        BackgroundEngine.drawIntro(offCtx, w, h, t);
+      }
       if (_exportEnding.active && BackgroundEngine.drawEnding) {
         BackgroundEngine.drawEnding(offCtx, w, h, t);
       }

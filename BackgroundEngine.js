@@ -7130,17 +7130,401 @@ const BackgroundEngine = (() => {
   }
 
   /* ═══════════════════════════════════════════════
+     TITLE CARD — общая типографика вступления и концовки
+
+     Вступление и концовка — это одна и та же карточка, прочитанная в
+     разные стороны: одна открывает кадр, вторая его закрывает. Поэтому
+     геометрия, кегли и приёмы у них общие и живут здесь, а не дублируются
+     в двух местах: иначе интро и финал расходятся по мелочам и перестают
+     читаться как рамка одного клипа.
+
+     Ключевой приём обеих — РЕВЕЛ ПО ЛИНИИ. Сначала проводится тонкая
+     акцентная черта, и заголовок выезжает ИЗ-ПОД неё, обрезанный по ней же.
+     Это титр, а не набор букв с тенями: буквы не «прилетают» каждая своим
+     маршрутом, они открываются одной шторкой.
+  ═══════════════════════════════════════════════ */
+  const CARD = {
+    accent:  '#e8ff00',
+    accentR: 232, accentG: 255, accentB: 0,
+    text:    '#f4eedd',        // тёплый кремовый, не чисто белый
+  };
+
+  /* Ширина набора с разрядкой + сами ширины букв (один замер на вызов). */
+  function _cardMeasure(ctx, letters, spacing) {
+    const widths = [];
+    let total = 0;
+    for (const c of letters) {
+      const w = ctx.measureText(c).width;
+      widths.push(w);
+      total += w + spacing;
+    }
+    return { widths, total: total - spacing };
+  }
+
+  /* Заголовок, выезжающий из-под линии.
+     k     — 0..1 раскрытие (буква за буквой),
+     riseK — 0..1 общий подъём блока (для «улёта» на выходе),
+     clip  — резать ли по базовой линии (на выходе резать не надо). */
+  function _cardTitle(ctx, txt, cx, baseY, size, k, opts = {}) {
+    if (!txt || k <= 0) return 0;
+    const alpha   = opts.alpha == null ? 1 : opts.alpha;
+    const letters = txt.split('');
+    const maxW    = (opts.maxW == null ? ctx.canvas.width * 0.84 : opts.maxW);
+
+    ctx.save();
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
+
+    /* Кегль подгоняется под ширину кадра. Без этого «СПАСИБО ЗА ПРОСМОТР»
+       на вертикали 9:16 уезжает за оба края: кегль считался только от
+       высоты кадра, а ширину титр не видел вовсе. Замер настоящий
+       (measureText по разрядке), а не по таблице средних. */
+    let spacing = size * 0.18;
+    ctx.font = `900 ${size}px "Bebas Neue", "Oswald", sans-serif`;
+    let m = _cardMeasure(ctx, letters, spacing);
+    if (m.total > maxW && m.total > 0) {
+      size    = Math.max(10, size * (maxW / m.total));
+      spacing = size * 0.18;
+      ctx.font = `900 ${size}px "Bebas Neue", "Oswald", sans-serif`;
+      m = _cardMeasure(ctx, letters, spacing);
+    }
+
+    // Шторка: всё, что ниже базовой линии, не показываем — буква
+    // «выходит» из черты, а не появляется из воздуха.
+    if (opts.clip !== false) {
+      ctx.beginPath();
+      ctx.rect(0, baseY - size * 1.35, ctx.canvas.width, size * 1.35);
+      ctx.clip();
+    }
+
+    let x = cx - m.total / 2;
+    for (let i = 0; i < letters.length; i++) {
+      // Каскад: каждая следующая буква стартует чуть позже предыдущей,
+      // но общий разброс ограничен — иначе титр «печатается», а не открывается.
+      const lag = letters.length > 1 ? (i / (letters.length - 1)) * 0.45 : 0;
+      const lp  = _clamp01((k * 1.45 - lag) / 0.55);
+      const lk  = _easeOutCubic(lp);
+      if (lk > 0.005) {
+        const dy = (1 - lk) * size * 0.85;
+        ctx.globalAlpha = alpha * Math.min(1, lk * 1.6);
+        ctx.fillStyle = CARD.text;
+        ctx.fillText(letters[i], x, baseY + dy);
+      }
+      x += m.widths[i] + spacing;
+    }
+    ctx.restore();
+    return m.total;
+  }
+
+  /* Акцентная черта, растущая из центра. Она же — база для заголовка. */
+  function _cardRule(ctx, cx, y, halfW, k, alpha) {
+    if (k <= 0 || alpha <= 0) return;
+    const w = halfW * _easeOutCubic(k);
+    const g = ctx.createLinearGradient(cx - w, 0, cx + w, 0);
+    g.addColorStop(0,    `rgba(${CARD.accentR},${CARD.accentG},${CARD.accentB},0)`);
+    g.addColorStop(0.5,  `rgba(${CARD.accentR},${CARD.accentG},${CARD.accentB},${0.9 * alpha})`);
+    g.addColorStop(1,    `rgba(${CARD.accentR},${CARD.accentG},${CARD.accentB},0)`);
+    ctx.save();
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - w, y - 0.5, w * 2, 1);
+    ctx.restore();
+  }
+
+  /* Строка мелким набором с разрядкой (подзаголовки, подписи). */
+  function _cardLine(ctx, txt, cx, y, size, k, opts = {}) {
+    if (!txt || k <= 0) return;
+    const alpha = (opts.alpha == null ? 1 : opts.alpha) * k;
+    if (alpha <= 0.004) return;
+    ctx.save();
+    const mkFont = (px) => opts.font
+      ? String(opts.font).replace(/(\d+(?:\.\d+)?)px/, px.toFixed(1) + 'px')
+      : `400 ${px.toFixed(1)}px "Inter", system-ui, sans-serif`;
+    ctx.font = mkFont(size);
+    // Та же подгонка по ширине, что и у титра: подпись на вертикали 9:16
+    // иначе выходит за оба края кадра.
+    const maxW = opts.maxW == null ? ctx.canvas.width * 0.86 : opts.maxW;
+    const w0 = ctx.measureText(txt).width;
+    if (w0 > maxW && w0 > 0) ctx.font = mkFont(Math.max(7, size * (maxW / w0)));
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = opts.color || CARD.text;
+    // Разрядка сходится к номиналу — строка «садится» на место,
+    // а не просто проявляется.
+    if (ctx.letterSpacing !== undefined) {
+      const tr = (opts.track == null ? 2 : opts.track) + (1 - _easeOutCubic(k)) * 8;
+      ctx.letterSpacing = tr.toFixed(2) + 'px';
+    }
+    ctx.fillText(txt, cx, y + (1 - _easeOutCubic(k)) * (opts.rise == null ? 10 : opts.rise));
+    ctx.restore();
+  }
+
+  /* Атмосферные пылинки — общий пул для обеих карточек. */
+  function _cardMotes(ctx, cw, ch, dt, amount, store) {
+    if (amount <= 0.02) return;
+    if (!store.motes) {
+      const arr = [];
+      for (let i = 0; i < 42; i++) {
+        arr.push({
+          x: Math.random(), yOffset: Math.random(),
+          speed: 0.014 + Math.random() * 0.030,
+          sway: 5 + Math.random() * 16, swayFreq: 0.18 + Math.random() * 0.35,
+          phase: Math.random() * Math.PI * 2,
+          size: 0.6 + Math.random() * 1.4,
+          accent: Math.random() < 0.28,
+          alpha: 0.16 + Math.random() * 0.34,
+        });
+      }
+      store.motes = arr;
+    }
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (const p of store.motes) {
+      const cycle = ((p.yOffset + dt * p.speed) % 1 + 1) % 1;
+      const py = ch * (1 - cycle);
+      const px = p.x * cw + Math.sin(dt * p.swayFreq + p.phase) * p.sway;
+      const a  = amount * p.alpha * Math.sin(cycle * Math.PI);
+      if (a < 0.005) continue;
+      ctx.fillStyle = p.accent
+        ? `rgba(${CARD.accentR},${CARD.accentG},${CARD.accentB},${a})`
+        : `rgba(244,238,221,${a * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(px, py, p.size, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  /* Кинематографичная подложка карточки: тёплый чёрный + виньетка. */
+  function _cardPlate(ctx, cw, ch, a) {
+    if (a <= 0.004) return;
+    const g = ctx.createLinearGradient(0, 0, 0, ch);
+    g.addColorStop(0,   `rgba(6,10,16,${a})`);
+    g.addColorStop(0.5, `rgba(2,4,8,${a})`);
+    g.addColorStop(1,   `rgba(8,6,4,${a})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cw, ch);
+
+    const vg = ctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.2,
+                                        cw / 2, ch / 2, Math.max(cw, ch) * 0.75);
+    vg.addColorStop(0,   'rgba(0,0,0,0)');
+    vg.addColorStop(0.6, `rgba(0,0,0,${0.35 * a})`);
+    vg.addColorStop(1,   `rgba(0,0,0,${0.85 * a})`);
+    ctx.fillStyle = vg;
+    ctx.fillRect(0, 0, cw, ch);
+  }
+
+  /* Шторки кадра. Открываются в интро, закрываются в финале. */
+  function _cardBands(ctx, cw, ch, frac, alpha) {
+    if (frac <= 0.001 || alpha <= 0.004) return;
+    const h = ch * frac;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, cw, h);
+    ctx.fillRect(0, ch - h, cw, h);
+    ctx.restore();
+  }
+
+  /* ═══════════════════════════════════════════════
+     INTRO SEQUENCE — вступление и передача кадра песне
+
+     Клип начинался с первой же строки: музыка идёт, а в кадре ничего не
+     происходит, потом внезапно влетает текст. Проигрыш до первого слова —
+     это не пустое место, это вступление, и его надо ОТЫГРАТЬ.
+
+     Главное здесь — не сама карточка, а ПЕРЕДАЧА. Последняя треть
+     вступления — открытие кадра: шторки уезжают, подложка снимается,
+     титр уходит вверх и растворяется, и ровно к моменту первой строки
+     кадр уже чистый и живой. Никакого реза: к первому слову вступление
+     уже кончилось, а не обрывается на нём.
+  ═══════════════════════════════════════════════ */
+  const intro = {
+    start:    null,   // абсолютное время старта (сек), обычно 0
+    end:      null,   // время, к которому кадр ДОЛЖЕН быть уже открыт
+    title:    '',     // название трека
+    subtitle: '',     // подпись под названием
+    eyebrow:  '// PROLOGUE',
+    minLead:  4.0,    // короче — вступления не будет, оно не успеет сыграть
+    maxLead:  12.0,   // дольше — карточка начинает висеть, а не играть
+    _s:       {},     // приватный сторедж (пылинки)
+  };
+  const INTRO_OPEN = 0.66;   // с какой доли вступления начинается передача
+  const INTRO_IN   = 0.09;   // доля на заход карточки (fade-up из кадра)
+
+  /* Автовступление: от 0 до первой строки, с запасом на посадку.
+     handoff — сколько секунд ДО первой строки кадр уже должен быть чистым. */
+  function setIntroMarker(startTime, endTime, opts = {}) {
+    if (startTime == null || endTime == null) { intro.start = intro.end = null; return; }
+    const handoff = opts.handoff == null ? 0.35 : opts.handoff;
+    const e = Math.max(0, endTime - handoff);
+    let   s = Math.max(0, startTime);
+    if (e - s < (opts.minLead == null ? intro.minLead : opts.minLead)) {
+      intro.start = intro.end = null;   // слишком короткий проигрыш
+      return;
+    }
+    /* Длинный проигрыш не значит длинную карточку: титр, провисевший
+       двадцать секунд, — это заставка, а не вступление. Сверху ставим
+       потолок и начинаем позже, а заход карточки (INTRO_IN) делает из
+       этого нормальное «кадр темнеет — приходит титр». */
+    const maxLead = opts.maxLead == null ? intro.maxLead : opts.maxLead;
+    if (e - s > maxLead) s = e - maxLead;
+    intro.start = s;
+    intro.end   = e;
+    if (opts.title    !== undefined) intro.title    = opts.title || '';
+    if (opts.subtitle !== undefined) intro.subtitle = opts.subtitle || '';
+    if (opts.eyebrow  !== undefined) intro.eyebrow  = opts.eyebrow || '';
+  }
+  function clearIntroMarker() { intro.start = intro.end = null; }
+  function getIntroMarker() {
+    return intro.start == null ? null
+      : { start: intro.start, end: intro.end, title: intro.title };
+  }
+  function setIntroTitle(title, subtitle) {
+    if (title    !== undefined) intro.title    = title || '';
+    if (subtitle !== undefined) intro.subtitle = subtitle || '';
+  }
+
+  /* Состояние вступления. contentAlpha — насколько виден САМ клип под
+     карточкой: в начале почти не виден, к передаче раскрывается до 1. */
+  function getIntroState(t) {
+    if (intro.start == null || t < intro.start || t >= intro.end) {
+      return { active: false, contentAlpha: 1, progress: 1 };
+    }
+    const D = intro.end - intro.start;
+    const p = _clamp01((t - intro.start) / D);
+    // Раскрытие идёт в последней трети — до неё кадр держится приглушённым.
+    const openP = _clamp01((p - INTRO_OPEN) / (1 - INTRO_OPEN));
+    const open  = openP * openP * openP * (openP * (openP * 6 - 15) + 10);  // smootherstep
+    const inK   = _clamp01(p / INTRO_IN);
+    const inS   = inK * inK * (3 - 2 * inK);
+    // 0.24 — фон не в нуле даже под карточкой: за титром живёт картинка,
+    // иначе вступление читается как чёрный экран с текстом.
+    const dim = 0.24 + 0.76 * open;
+    return {
+      active: true,
+      progress: p,
+      // Заход: приглушение приходит не мгновенно, а за INTRO_IN — так
+      // вступление, начатое не с нуля, не «щёлкает» по кадру.
+      contentAlpha: 1 - (1 - dim) * inS,
+      open,
+    };
+  }
+
+  function drawIntro(ctx, cw, ch, t) {
+    if (intro.start == null || t < intro.start || t >= intro.end) return;
+    const dt = t - intro.start;
+    const D  = intro.end - intro.start;
+    const p  = _clamp01(dt / D);
+
+    // Передача: 1 → кадр полностью открыт. Всё оформление гаснет по ней.
+    const openP = _clamp01((p - INTRO_OPEN) / (1 - INTRO_OPEN));
+    const open  = openP * openP * openP * (openP * (openP * 6 - 15) + 10);
+    const hold  = 1 - open;                      // «сколько ещё держим карточку»
+    if (hold <= 0.002) return;
+
+    const cx = cw / 2, cy = ch / 2;
+
+    // Заход карточки — тот же, что в getIntroState: оформление и
+    // приглушение кадра обязаны приходить одной кривой.
+    const inK = _clamp01(p / INTRO_IN);
+    const inS = inK * inK * (3 - 2 * inK);
+    const on  = hold * inS;
+
+    // ── 1. Подложка. Снимается на передаче.
+    _cardPlate(ctx, cw, ch, 0.92 * on);
+
+    // ── 2. Шторки: стоят широко и УЕЗЖАЮТ за кадр — кадр раскрывается.
+    _cardBands(ctx, cw, ch, 0.11 * hold, on);
+
+    // ── 3. Пылинки в луче — только пока карточка держится.
+    _cardMotes(ctx, cw, ch, dt, on * 0.9, intro._s);
+
+    // Вся композиция на передаче уходит вверх и чуть наезжает —
+    // камера проходит СКВОЗЬ титр, а не выключает его.
+    ctx.save();
+    ctx.translate(cx, cy - open * ch * 0.10);
+    ctx.scale(1 + open * 0.10, 1 + open * 0.10);
+    ctx.translate(-cx, -cy);
+
+    // ── 4. Черта, из-под которой выходит название.
+    const ruleP = _clamp01(p / 0.16);
+    const ruleY = cy + ch * 0.012;
+    _cardRule(ctx, cx, ruleY, cw * 0.20, ruleP, on * 0.95);
+
+    // ── 5. Eyebrow над чертой.
+    const ebK = _clamp01((p - 0.10) / 0.14);
+    _cardLine(ctx, intro.eyebrow, cx, cy - ch * 0.105, Math.max(10, Math.round(ch * 0.016)), ebK, {
+      font: `600 ${Math.max(10, Math.round(ch * 0.016))}px "JetBrains Mono", monospace`,
+      color: CARD.accent, alpha: 0.75 * hold, track: 3, rise: 6,
+    });
+
+    // ── 6. Название — выезжает из-под черты.
+    const titleK = _clamp01((p - 0.12) / 0.42);
+    const titleSize = Math.round(ch * 0.105);
+    _cardTitle(ctx, intro.title, cx, ruleY - ch * 0.012, titleSize, titleK, { alpha: hold });
+
+    // ── 7. Подпись под чертой.
+    const subK = _clamp01((p - 0.34) / 0.26);
+    _cardLine(ctx, intro.subtitle, cx, ruleY + ch * 0.055, Math.round(ch * 0.022), subK,
+              { alpha: 0.58 * hold, track: 4 });
+
+    ctx.restore();
+
+    // ── 8. Уголки кадра — снимаются первыми, ещё до раскрытия.
+    const cornerK = _clamp01((p - 0.20) / 0.16) * _clamp01(1 - open * 2.2);
+    if (cornerK > 0.01) {
+      const pad = Math.min(cw, ch) * 0.045;
+      const len = Math.min(cw, ch) * 0.040;
+      ctx.save();
+      ctx.strokeStyle = `rgba(${CARD.accentR},${CARD.accentG},${CARD.accentB},${0.45 * cornerK})`;
+      ctx.lineWidth = 1.2;
+      for (const [x, y, sx, sy] of [[pad, pad, 1, 1], [cw - pad, pad, -1, 1],
+                                    [pad, ch - pad, 1, -1], [cw - pad, ch - pad, -1, -1]]) {
+        ctx.beginPath();
+        ctx.moveTo(x, y + sy * len);
+        ctx.lineTo(x, y);
+        ctx.lineTo(x + sx * len, y);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // ── 9. Вспышка передачи: короткий тёплый блик ровно в момент,
+    //       когда кадр раскрывается. Он и склеивает вступление с песней.
+    if (open > 0.001 && open < 0.999) {
+      const flash = Math.sin(open * Math.PI);
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = `rgba(255,252,225,${0.10 * flash})`;
+      ctx.fillRect(0, 0, cw, ch);
+      ctx.restore();
+    }
+  }
+
+  /* ═══════════════════════════════════════════════
      ENDING SEQUENCE — финальная прощальная анимация
      [конец] / [end] / /КОНЕЦ ВИДЕО/ в LRC запускают её
+
+     Здесь стояла карточка, набитая всем сразу: сканлайны, зерно, блик,
+     бегущая волна, четыре tech-подписи по углам, ромб, каскад букв с
+     тенями, машинка с курсором. Каждый элемент по отдельности имел смысл,
+     а вместе они превращали финал в приборную панель: в кадре нет ни одной
+     паузы и ни одного главного объекта.
+
+     Осталось четыре вещи и одна мысль: кадр гаснет → черта → титр из-под
+     черты → подпись → шторки закрываются в чёрное. Финал должен ЗАКРЫВАТЬ,
+     а закрывает не количество деталей, а тишина после них.
   ═══════════════════════════════════════════════ */
   const ending = {
     time:     null,     // абсолютное время старта (сек)
-    duration: 12.0,     // длительность всей прощальной анимации (сек)
-    fadeFrac: 0.35,     // доля длительности на fade-out контента/звука (35% = ~4.2с при D=12)
+    duration: 14.0,     // длительность всей прощальной анимации (сек)
+    fadeFrac: 0.30,     // доля длительности на fade-out контента/звука
     titleRu:  'СПАСИБО ЗА ПРОСМОТР',
     titleEn:  'Thank you for watching',
     subRu:    'Это была история, и она дошла до конца',
     subEn:    'A story that has reached its end',
+    _s:       {},
   };
 
   function setEndingMarker(time, opts = {}) {
@@ -7179,6 +7563,8 @@ const BackgroundEngine = (() => {
     };
   }
 
+  const END_CLOSE = 0.82;   // с какой доли финала кадр начинает закрываться
+
   // Рисует прощальную анимацию поверх всего
   function drawEnding(ctx, cw, ch, t) {
     if (ending.time == null || t < ending.time) return;
@@ -7186,426 +7572,72 @@ const BackgroundEngine = (() => {
     const D  = ending.duration;
     const p  = Math.min(dt / D, 1);
 
-    // Lazy init атмосферных частиц (детерминированный дрейф от dt)
-    if (!ending._particles) {
-      const arr = [];
-      for (let i = 0; i < 60; i++) {
-        arr.push({
-          x:        Math.random(),
-          yOffset:  Math.random(),
-          speed:    0.018 + Math.random() * 0.035,
-          sway:     6 + Math.random() * 18,
-          swayFreq: 0.20 + Math.random() * 0.40,
-          phase:    Math.random() * Math.PI * 2,
-          size:     0.7 + Math.random() * 1.6,
-          accent:   Math.random() < 0.30,
-          alpha:    0.20 + Math.random() * 0.45,
-        });
-      }
-      ending._particles = arr;
-    }
-
-    // ── 1. Атмосферная подложка ─────────────────────────────
-    // Появляется плавно вместе с fade контента (35% от D)
-    const bgT = Math.min(dt / (D * ending.fadeFrac), 1);
+    // Подложка приходит вместе с затуханием контента (fadeFrac).
+    const bgT = _clamp01(dt / (D * ending.fadeFrac));
     const bg  = bgT * bgT * bgT * (bgT * (bgT * 6 - 15) + 10);   // smootherstep
     if (bg < 0.02) return;
 
-    // Тёмный кинематографичный градиент (не чисто чёрный — слегка синева сверху, тепло снизу)
-    const bgGrad = ctx.createLinearGradient(0, 0, 0, ch);
-    bgGrad.addColorStop(0,   `rgba(6,10,16,${bg})`);
-    bgGrad.addColorStop(0.5, `rgba(2,4,8,${bg})`);
-    bgGrad.addColorStop(1,   `rgba(8,6,4,${bg})`);
-    ctx.fillStyle = bgGrad;
-    ctx.fillRect(0, 0, cw, ch);
+    // Закрытие: последние END_CLOSE..1 — карточка гаснет, шторки сходятся.
+    const closeP = _clamp01((p - END_CLOSE) / (1 - END_CLOSE));
+    const close  = closeP * closeP * closeP * (closeP * (closeP * 6 - 15) + 10);
+    const live   = bg * (1 - close);      // видимость самой карточки
 
-    // Виньетка (резкая по краям, мягкая в центре)
-    const vg = ctx.createRadialGradient(cw / 2, ch / 2, Math.min(cw, ch) * 0.2,
-                                        cw / 2, ch / 2, Math.max(cw, ch) * 0.75);
-    vg.addColorStop(0, 'rgba(0,0,0,0)');
-    vg.addColorStop(0.6, `rgba(0,0,0,${0.35 * bg})`);
-    vg.addColorStop(1, `rgba(0,0,0,${0.85 * bg})`);
-    ctx.fillStyle = vg;
-    ctx.fillRect(0, 0, cw, ch);
+    const cx = cw / 2, cy = ch / 2;
 
-    // Очень тонкие горизонтальные scan lines — старая киноплёнка
-    if (bg > 0.6) {
-      ctx.save();
-      ctx.globalAlpha = 0.07 * bg;
-      ctx.fillStyle = '#000';
-      const lineStep = 3;
-      for (let y = 0; y < ch; y += lineStep * 2) {
-        ctx.fillRect(0, y, cw, 1);
-      }
-      ctx.restore();
-    }
+    _cardPlate(ctx, cw, ch, bg);
+    _cardMotes(ctx, cw, ch, dt, live * 0.8, ending._s);
 
-    // Постоянный film grain (живой, не только в финале)
-    if (bg > 0.5) {
-      ctx.save();
-      ctx.globalAlpha = 0.045 * bg;
-      ctx.fillStyle = '#ffffff';
-      for (let i = 0; i < 140; i++) {
-        ctx.fillRect(Math.random() * cw, Math.random() * ch, 1.3, 1.3);
-      }
-      ctx.restore();
-    }
-
-    // Глобальные параметры композиции
-    const cx = cw / 2;
-    const cy = ch / 2;
-    const accent = '#e8ff00';
-    const accentR = 232, accentG = 255, accentB = 0;
-    const textCol = '#f4eedd';      // тёплый кремовый, не чисто белый
-
-    // Subtle breathing — вся композиция дышит на ±1px
-    const breath = Math.sin(dt * 0.9) * 1.2;
+    // Дыхание композиции ±1px — кадр не мёртвый, но и не «анимированный».
     ctx.save();
-    ctx.translate(0, breath);
+    ctx.translate(0, Math.sin(dt * 0.8) * 1.1 - close * ch * 0.03);
 
-    // ── 1.5. Атмосферные пылинки в жёлтом свете (дрейф вверх) ──
-    if (bg > 0.25) {
-      ctx.save();
-      ctx.globalCompositeOperation = 'lighter';
-      const particles = ending._particles;
-      for (let i = 0; i < particles.length; i++) {
-        const prt = particles[i];
-        const cycle = ((prt.yOffset + dt * prt.speed) % 1 + 1) % 1;
-        const py = ch * (1 - cycle);
-        const px = prt.x * cw + Math.sin(dt * prt.swayFreq + prt.phase) * prt.sway;
-        const life = Math.sin(cycle * Math.PI);   // 0 → 1 → 0 за цикл
-        const a = bg * prt.alpha * life;
-        if (a < 0.005) continue;
-        ctx.fillStyle = prt.accent
-          ? `rgba(232,255,0,${a})`
-          : `rgba(244,238,221,${a * 0.65})`;
-        ctx.beginPath();
-        ctx.arc(px, py, prt.size, 0, Math.PI * 2);
-        ctx.fill();
-      }
-      ctx.restore();
-    }
+    // ── 1. Черта, из-под которой встаёт титр.
+    const ruleY = cy + ch * 0.008;
+    _cardRule(ctx, cx, ruleY, cw * 0.19, _clamp01((p - 0.16) / 0.18), live * 0.95);
 
-    // ── 2. Eyebrow tag (NS «// EPILOGUE») — самым первым ───────
-    const ebStart = 0.18, ebEnd = 0.32;
-    const ebP = _clamp01((p - ebStart) / (ebEnd - ebStart));
-    const ebK = _easeOutCubic(ebP);
-    if (ebK > 0) {
-      ctx.save();
-      ctx.globalAlpha = ebK * 0.75;
-      ctx.font = '600 11px "JetBrains Mono", monospace';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillStyle = accent;
-      const eyebrowSize = Math.round(ch * 0.085);
-      ctx.fillText('// EPILOGUE', cx, cy - eyebrowSize * 1.55);
-      // Маленькие горизонтальные риски по бокам
-      const tag = '// EPILOGUE';
-      const tagW = ctx.measureText(tag).width;
-      const tickGap = 18, tickLen = 22 * ebK;
-      ctx.fillRect(cx - tagW / 2 - tickGap - tickLen, cy - eyebrowSize * 1.55 - 0.5, tickLen, 1);
-      ctx.fillRect(cx + tagW / 2 + tickGap, cy - eyebrowSize * 1.55 - 0.5, tickLen, 1);
-      ctx.restore();
-    }
+    // ── 2. Eyebrow.
+    const ebSize = Math.max(10, Math.round(ch * 0.016));
+    _cardLine(ctx, '// EPILOGUE', cx, cy - ch * 0.115, ebSize,
+              _clamp01((p - 0.20) / 0.14),
+              { font: `600 ${ebSize}px "JetBrains Mono", monospace`,
+                color: CARD.accent, alpha: 0.72 * live, track: 3, rise: 6 });
 
-    // ── 3. Главный RU-заголовок — каскадные буквы, более долго ─
-    const titleStart = 0.22, titleEnd = 0.62;
-    const titleP = _clamp01((p - titleStart) / (titleEnd - titleStart));
-    if (titleP > 0) {
-      const titleSize = Math.round(ch * 0.092);
-      const titleY = cy - titleSize * 0.35;
-      ctx.save();
-      ctx.textAlign = 'left';
-      ctx.textBaseline = 'middle';
-      ctx.font = `900 ${titleSize}px "Bebas Neue", "Oswald", sans-serif`;
-      const letters = (ending.titleRu || '').split('');
-      const letterSpacing = titleSize * 0.20;
-      let totalW = 0;
-      const widths = [];
-      for (const c1 of letters) {
-        const w = ctx.measureText(c1).width;
-        widths.push(w);
-        totalW += w + letterSpacing;
-      }
-      totalW -= letterSpacing;
+    // ── 3. Главный RU-титр — выезжает из-под черты.
+    _cardTitle(ctx, ending.titleRu, cx, ruleY - ch * 0.012,
+               Math.round(ch * 0.098), _clamp01((p - 0.24) / 0.34), { alpha: live });
 
-      // Световое "свечение" пробегает по тексту слева направо
-      const sweepP = _clamp01((p - 0.30) / 0.45);  // 0..1 за 0.30..0.75
-      const sweepK = sweepP;                        // линейно
+    // ── 4. RU подпись.
+    _cardLine(ctx, ending.subRu, cx, ruleY + ch * 0.052, Math.round(ch * 0.023),
+              _clamp01((p - 0.44) / 0.20), { alpha: 0.55 * live, track: 4 });
 
-      let xCursor = cx - totalW / 2;
-      for (let i = 0; i < letters.length; i++) {
-        // Каждая буква имеет свой timing — каскад с длинной задержкой
-        const lp = _clamp01(titleP * 1.6 - i * 0.055);
-        const lk = _easeOutCubic(lp);
-        const dyOff = (1 - lk) * titleSize * 0.45;
-        const blurOff = (1 - lk) * 8;
-        if (lk < 0.02) { xCursor += widths[i] + letterSpacing; continue; }
+    // ── 5. EN строка — курсива хватает, машинка с курсором не нужна.
+    const enSize = Math.round(ch * 0.040);
+    _cardLine(ctx, ending.titleEn, cx, cy + ch * 0.145, enSize,
+              _clamp01((p - 0.54) / 0.22),
+              { font: `italic 500 ${enSize}px "Playfair Display", "Inter", Georgia, serif`,
+                alpha: 0.85 * live, track: 1, rise: 12 });
 
-        // Расстояние буквы от sweep-фронта (для подсветки)
-        const letterCenterX = xCursor + widths[i] / 2;
-        const sweepX = (cx - totalW / 2) + sweepK * totalW;
-        const sweepDist = Math.abs(letterCenterX - sweepX) / (titleSize * 1.2);
-        const sweepBoost = Math.max(0, 1 - sweepDist) * 0.7;
+    ctx.restore();
 
-        ctx.globalAlpha = lk;
-        // Двойной слой: glow + body
-        ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},${(0.35 + sweepBoost * 0.5) * lk})`;
-        ctx.shadowBlur  = (18 + blurOff + sweepBoost * 30) * lk;
-        ctx.fillStyle = textCol;
-        ctx.fillText(letters[i], xCursor, titleY + dyOff);
-        xCursor += widths[i] + letterSpacing;
-      }
-      ctx.shadowBlur = 0;
-      ctx.restore();
-
-      // ── Декоративная разделительная линия ─ ◇ ─ под заголовком ──
-      const sepP = _clamp01((p - 0.42) / 0.20);
-      const sepK = _easeOutCubic(sepP);
-      if (sepK > 0) {
-        const sepY = titleY + titleSize * 0.70;
-        ctx.save();
-        ctx.globalAlpha = sepK * 0.9;
-        // Боковые линии (slide-out от центра)
-        const maxLineW = cw * 0.16;
-        const lineW = maxLineW * sepK;
-        const gap = 22;
-        // Левая
-        const gl = ctx.createLinearGradient(cx - gap - lineW, 0, cx - gap, 0);
-        gl.addColorStop(0, 'rgba(232,255,0,0)');
-        gl.addColorStop(0.6, 'rgba(232,255,0,0.5)');
-        gl.addColorStop(1, 'rgba(232,255,0,0.85)');
-        ctx.fillStyle = gl;
-        ctx.fillRect(cx - gap - lineW, sepY - 0.5, lineW, 1);
-        // Правая
-        const gr = ctx.createLinearGradient(cx + gap, 0, cx + gap + lineW, 0);
-        gr.addColorStop(0, 'rgba(232,255,0,0.85)');
-        gr.addColorStop(0.4, 'rgba(232,255,0,0.5)');
-        gr.addColorStop(1, 'rgba(232,255,0,0)');
-        ctx.fillStyle = gr;
-        ctx.fillRect(cx + gap, sepY - 0.5, lineW, 1);
-        // Ромб ◇ по центру с подсветкой
-        const dShape = 6 * sepK;
-        const pulse = 0.85 + Math.sin(dt * 1.8) * 0.15;
-        ctx.translate(cx, sepY);
-        ctx.rotate(Math.PI / 4);
-        ctx.fillStyle = `rgba(232,255,0,${pulse * sepK})`;
-        ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},${0.5 * sepK})`;
-        ctx.shadowBlur = 14 * sepK;
-        ctx.fillRect(-dShape / 2, -dShape / 2, dShape, dShape);
-        ctx.shadowBlur = 0;
-        ctx.restore();
-      }
-    }
-
-    // ── 4. RU подзаголовок ("Это была история...") ─────────────
-    const subRuStart = 0.50, subRuEnd = 0.75;
-    const subRuP = _clamp01((p - subRuStart) / (subRuEnd - subRuStart));
-    const subRuK = _easeOutCubic(subRuP);
-    if (subRuK > 0 && ending.subRu) {
-      const subSize = Math.round(ch * 0.024);
-      const subY = cy + ch * 0.045 + (1 - subRuK) * 14;
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.font = `400 ${subSize}px "Inter", system-ui, sans-serif`;
-      ctx.globalAlpha = subRuK * 0.62;
-      ctx.fillStyle = textCol;
-      ctx.letterSpacing = '2px';
-      ctx.fillText(ending.subRu, cx, subY);
-      ctx.restore();
-    }
-
-    // ── 5. Английский — печатающаяся машинка (typewriter) ──────
-    const enStart = 0.55, enEnd = 0.88;
-    const enP = _clamp01((p - enStart) / (enEnd - enStart));
-    if (enP > 0) {
-      const enSize = Math.round(ch * 0.045);
-      const enY = cy + ch * 0.13;
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.font = `italic 500 ${enSize}px "Playfair Display", "Inter", Georgia, serif`;
-      const fullText = ending.titleEn || '';
-      // Печатаем посимвольно (typewriter)
-      const totalChars = fullText.length;
-      const visible = Math.ceil(enP * totalChars);
-      const visibleText = fullText.slice(0, visible);
-      // Курсор моргает только пока ещё печатает
-      const showCursor = visible < totalChars && (Math.floor(dt * 2) % 2 === 0);
-
-      ctx.globalAlpha = 0.92;
-      ctx.shadowColor = `rgba(${accentR},${accentG},${accentB},0.22)`;
-      ctx.shadowBlur = 14;
-      ctx.fillStyle = textCol;
-      ctx.fillText(visibleText + (showCursor ? '▎' : ''), cx, enY);
-      ctx.shadowBlur = 0;
-
-      // Подчёркивающая полоска появляется когда печать закончилась
-      if (visible >= totalChars) {
-        const undP = _clamp01((p - (enStart + (enEnd - enStart) * 0.85)) / 0.10);
-        const undK = _easeOutCubic(undP);
-        if (undK > 0) {
-          const fullW = ctx.measureText(fullText).width;
-          const undW = fullW * 0.55 * undK;
-          const undY = enY + enSize * 0.78;
-          const ug = ctx.createLinearGradient(cx - undW / 2, 0, cx + undW / 2, 0);
-          ug.addColorStop(0,   'rgba(232,255,0,0)');
-          ug.addColorStop(0.5, `rgba(232,255,0,${0.7 * undK})`);
-          ug.addColorStop(1,   'rgba(232,255,0,0)');
-          ctx.fillStyle = ug;
-          ctx.fillRect(cx - undW / 2, undY, undW, 1);
-        }
-      }
-      ctx.restore();
-    }
-
-    // ── 6. EN sub-tagline ("A story that has reached its end") ──
-    const subEnStart = 0.70, subEnEnd = 0.90;
-    const subEnP = _clamp01((p - subEnStart) / (subEnEnd - subEnStart));
-    const subEnK = _easeOutCubic(subEnP);
-    if (subEnK > 0 && ending.subEn) {
-      const subSize = Math.round(ch * 0.020);
-      const subY = cy + ch * 0.20;
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.font = `italic 400 ${subSize}px "Playfair Display", Georgia, serif`;
-      ctx.globalAlpha = subEnK * 0.50;
-      ctx.fillStyle = textCol;
-      ctx.fillText('— ' + ending.subEn + ' —', cx, subY);
-      ctx.restore();
-    }
-
-    ctx.restore();  // снимаем breath translate
-
-    // ── 7. Брендовая подпись внизу с тонкой рамкой ──────────────
-    const brandStart = 0.78, brandEnd = 0.95;
-    const brandP = _clamp01((p - brandStart) / (brandEnd - brandStart));
-    const brandK = _easeOutCubic(brandP);
-    if (brandK > 0) {
+    // ── 6. Брендовая подпись внизу.
+    const brandK = _clamp01((p - 0.66) / 0.16);
+    if (brandK > 0.01 && live > 0.01) {
       const year = new Date().getFullYear();
-      ctx.save();
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.font = '600 10.5px "JetBrains Mono", monospace';
-      ctx.globalAlpha = brandK * 0.55;
-      ctx.fillStyle = textCol;
       const brandText = `${year}  ·  CRAFTED WITH RICOLE / PROJECT`;
-      const bw = ctx.measureText(brandText).width;
-      const by = ch - Math.min(cw, ch) * 0.045;
-      // Боковые риски
-      const tickW = 18 * brandK;
-      const tickGap = 14;
-      ctx.fillRect(cx - bw / 2 - tickGap - tickW, by - 0.5, tickW, 1);
-      ctx.fillRect(cx + bw / 2 + tickGap, by - 0.5, tickW, 1);
-      ctx.fillText(brandText, cx, by);
-      ctx.restore();
+      _cardLine(ctx, brandText, cx, ch - Math.min(cw, ch) * 0.055,
+                Math.max(9, Math.round(ch * 0.0135)), brandK,
+                { font: `600 ${Math.max(9, Math.round(ch * 0.0135))}px "JetBrains Mono", monospace`,
+                  alpha: 0.42 * live, track: 2, rise: 6 });
     }
 
-    // ── 7.5. SIGNAL waveform → flatline (умирает к концу) ─────
-    const wfStart = 0.42, wfEnd = 1.0;
-    const wfP = _clamp01((p - wfStart) / (wfEnd - wfStart));
-    if (wfP > 0) {
-      const wfFadeIn  = _clamp01(wfP / 0.08);
-      const wfFlatten = _clamp01((wfP - 0.55) / 0.40);   // последние 40% сплющиваем
-      const amp = (1 - wfFlatten) * 5.5;
-      const wfW = cw * 0.32;
-      const wfY = ch - Math.min(cw, ch) * 0.082;
-      const wfX0 = cx - wfW / 2;
-      const segs = 88;
+    // ── 7. Закрытие: шторки сходятся в чёрное и остаются.
+    _cardBands(ctx, cw, ch, 0.5 * close, bg);
+    if (close > 0.001) {
       ctx.save();
-      ctx.globalAlpha = wfFadeIn * 0.50;
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let i = 0; i <= segs; i++) {
-        const xn = i / segs;
-        const xx = wfX0 + xn * wfW;
-        const n =
-          Math.sin(xn * 22 + dt * 6.0) * 0.5 +
-          Math.sin(xn * 41 - dt * 9.0) * 0.3 +
-          Math.sin(xn * 7  + dt * 3.0) * 0.2;
-        const edgeTaper = Math.sin(xn * Math.PI);
-        const yy = wfY + n * amp * edgeTaper;
-        if (i === 0) ctx.moveTo(xx, yy);
-        else ctx.lineTo(xx, yy);
-      }
-      ctx.stroke();
-      // Playhead — гаснет вместе с амплитудой
-      if (wfFlatten < 0.95) {
-        const headAlpha = wfFadeIn * (1 - wfFlatten * 0.7);
-        const headX = wfX0 + wfW * (0.50 + Math.sin(dt * 1.4) * 0.18);
-        ctx.globalAlpha = headAlpha * 0.85;
-        ctx.fillStyle = accent;
-        ctx.beginPath();
-        ctx.arc(headX, wfY, 1.6, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.globalAlpha = headAlpha * 0.30;
-        ctx.beginPath();
-        ctx.arc(headX, wfY, 4, 0, Math.PI * 2);
-        ctx.fill();
-      }
+      ctx.globalAlpha = bg * close;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, cw, ch);
       ctx.restore();
-    }
-
-    // ── 8. Corner brackets с tech-метками ──────────────────────
-    const cornerP = _clamp01((p - 0.62) / 0.18);
-    const cornerK = _easeOutCubic(cornerP);
-    if (cornerK > 0) {
-      const pad = Math.min(cw, ch) * 0.045;
-      const len = Math.min(cw, ch) * 0.045;
-      ctx.save();
-      ctx.strokeStyle = `rgba(232,255,0,${0.55 * cornerK})`;
-      ctx.lineWidth = 1.2;
-      const corners = [
-        [pad, pad, 1, 1],
-        [cw - pad, pad, -1, 1],
-        [pad, ch - pad, 1, -1],
-        [cw - pad, ch - pad, -1, -1],
-      ];
-      for (const [x, y, sx, sy] of corners) {
-        ctx.beginPath();
-        ctx.moveTo(x, y + sy * len);
-        ctx.lineTo(x, y);
-        ctx.lineTo(x + sx * len, y);
-        ctx.stroke();
-      }
-      // Tech-метки в углах
-      ctx.font = '500 9px "JetBrains Mono", monospace';
-      ctx.globalAlpha = cornerK * 0.45;
-      ctx.textBaseline = 'top';
-      ctx.fillStyle = accent;
-      ctx.textAlign = 'left';
-      ctx.fillText('FIN.', pad + len + 8, pad + 1);
-      ctx.textAlign = 'right';
-      ctx.fillText('OUT', cw - pad - len - 8, pad + 1);
-      ctx.textBaseline = 'bottom';
-      ctx.textAlign = 'left';
-      ctx.fillStyle = `rgba(255,255,255,${0.4 * cornerK})`;
-      ctx.fillText('SIGNAL', pad + len + 8, ch - pad);
-      ctx.textAlign = 'right';
-      ctx.fillStyle = accent;
-      ctx.fillText('END', cw - pad - len - 8, ch - pad);
-      ctx.restore();
-    }
-
-    // ── 9. Лёгкий "lens flare" блик в правом верхнем углу ─────
-    if (p > 0.45 && p < 0.92) {
-      const flareK = Math.sin(_clamp01((p - 0.45) / 0.47) * Math.PI);  // дуга 0..1..0
-      if (flareK > 0.02) {
-        const fx = cw * 0.86, fy = ch * 0.18;
-        const fr = Math.min(cw, ch) * 0.18;
-        ctx.save();
-        ctx.globalCompositeOperation = 'lighter';
-        const fg = ctx.createRadialGradient(fx, fy, 0, fx, fy, fr);
-        fg.addColorStop(0,   `rgba(255,250,200,${0.18 * flareK})`);
-        fg.addColorStop(0.4, `rgba(232,255,0,${0.06 * flareK})`);
-        fg.addColorStop(1,   'rgba(232,255,0,0)');
-        ctx.fillStyle = fg;
-        ctx.fillRect(0, 0, cw, ch);
-        ctx.restore();
-      }
     }
   }
 
@@ -7829,6 +7861,7 @@ const BackgroundEngine = (() => {
     drawFxOverlay, drawLetterboxLayer,
     // Ending sequence
     setEndingMarker, clearEndingMarker, getEndingMarker, getEndingState, drawEnding,
+    setIntroMarker, clearIntroMarker, getIntroMarker, setIntroTitle, getIntroState, drawIntro,
     _forceResetSprings, // для ExportEngine
     // Per-line cinematic camera scenes
     setLineCamScene, clearLineCamScene, getLineCamScene,

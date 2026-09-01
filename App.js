@@ -39,6 +39,10 @@ const App = (() => {
   // ── Лирика
   let lyrics    = [];
   let activeIdx = -1;
+  // Титры вступления. Заполняются из имени аудиофайла — отдельного поля
+  // под название трека в интерфейсе нет.
+  let introTitle    = '';
+  let introSubtitle = '';
   let entryTime = 0;
 
   // ── Loop state
@@ -341,11 +345,19 @@ const App = (() => {
       : { active: false, contentAlpha: 1, audioVolume: 1 };
     // Применяем громкость к audio
     if (AudioEngine.setGain) AudioEngine.setGain(endingState.audioVolume);
-    // Если ending активен, оборачиваем весь рендер контента в globalAlpha=contentAlpha
-    const _contentSaved = endingState.active && endingState.contentAlpha < 1;
+
+    // ── INTRO SEQUENCE: вступление приглушает клип и раскрывает его к
+    //    первой строке. Обе карточки правят ОДНУ прозрачность контента:
+    //    пересечься они не могут, но множитель общий — так кадр никогда
+    //    не «моргает» между двумя обёртками.
+    const introState = BackgroundEngine.getIntroState
+      ? BackgroundEngine.getIntroState(t)
+      : { active: false, contentAlpha: 1 };
+    const _frameAlpha = endingState.contentAlpha * introState.contentAlpha;
+    const _contentSaved = _frameAlpha < 1;
     if (_contentSaved) {
       ctx.save();
-      ctx.globalAlpha = endingState.contentAlpha;
+      ctx.globalAlpha = _frameAlpha;
     }
 
     if (BackgroundManager.hasEntries) {
@@ -451,7 +463,10 @@ const App = (() => {
     // Закрываем content-alpha обёртку, начатую перед фоном (для ending fade)
     if (_contentSaved) ctx.restore();
 
-    // ── ENDING OVERLAY (поверх всего, не подверженный fade) ──
+    // ── INTRO / ENDING OVERLAY (поверх всего, не подверженные fade) ──
+    if (introState.active && BackgroundEngine.drawIntro) {
+      BackgroundEngine.drawIntro(ctx, cw, ch, t);
+    }
     if (endingState.active && BackgroundEngine.drawEnding) {
       BackgroundEngine.drawEnding(ctx, cw, ch, t);
     }
@@ -511,7 +526,44 @@ const App = (() => {
       if (end) BackgroundEngine.setEndingMarker(end.time);
       else     BackgroundEngine.clearEndingMarker();
     }
+    // Вступление: проигрыш до первой спетой строки. Разметки не требует —
+    // если проигрыш достаточно длинный, вступление есть; если нет, движок
+    // сам от него откажется (см. minLead в setIntroMarker).
+    syncIntroMarker();
   }
+
+  /* Вступление считается от ПЕРВОЙ СПЕТОЙ строки, а не от первой строки
+     вообще: секционные метки и пустые маркеры стоят раньше и текста не
+     несут — по ним кадр открывать нечего. */
+  function syncIntroMarker() {
+    if (!BackgroundEngine.setIntroMarker) return;
+    const first = lyrics.find(l => l.text && l.text.trim());
+    if (!first) { BackgroundEngine.clearIntroMarker(); return; }
+    BackgroundEngine.setIntroMarker(0, first.time, {
+      title:    introTitle    || _titleFromLyrics(),
+      subtitle: introSubtitle || 'RICOLE / PROJECT',
+    });
+  }
+
+  /* Название берём из имени аудиофайла: отдельного поля под него в
+     интерфейсе нет, а имя трека почти всегда уже несёт название. */
+  function _titleFromAudioName(name) {
+    return String(name || '')
+      .replace(/\.[a-z0-9]+$/i, '')
+      .replace(/[_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toUpperCase();
+  }
+
+  /* Аудио может быть ещё не загружено — тогда за название сходит первая
+     секционная метка, а если нет и её, вступление идёт без титра
+     (черта, уголки и раскрытие кадра всё равно отрабатывают). */
+  function _titleFromLyrics() {
+    const sec = lyrics.find(l => l.section);
+    return sec ? String(sec.section).toUpperCase() : '';
+  }
+
 
   function renderLyricList() {
     const list = document.getElementById('lyricList');
@@ -622,6 +674,9 @@ const App = (() => {
       setStatus('loading', 'Loading audio…');
       const el = document.getElementById('audioDrop');
       el.querySelector('.drop-name').textContent = f.name;
+      // Название трека для карточки вступления — из имени файла.
+      introTitle = _titleFromAudioName(f.name);
+      syncIntroMarker();
       try {
         await AudioEngine.loadBuffer(await f.arrayBuffer());
         el.classList.add('loaded');
@@ -830,6 +885,8 @@ const App = (() => {
             el.classList.add('loaded');
             el.querySelector('.drop-name').textContent = '↺ ' + file.name;
           }
+          introTitle = _titleFromAudioName(file.name);
+          syncIntroMarker();
           ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.disabled = false;
