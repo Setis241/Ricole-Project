@@ -749,7 +749,7 @@ const ExportEngine = (() => {
               textX, trY,
               trAnim, _exportFadeA,
               params.translationColor || '#999999', _exportFont, trSize, w, t,
-              null, safe, _expShape
+              null, safe, null, null, { plain: true }
             );
           }
         }

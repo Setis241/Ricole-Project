@@ -964,7 +964,7 @@ const TextRenderer = (() => {
        — Мелкий кегль: перепад светлоты на высоте 20-30px съедает половину
          штриха, и подпись становится нечитаемой. Порог 38px — ниже него
          градиент физически некуда положить. */
-    const plainFill = !!span._ghost || size < 38;
+    const plainFill = !!span._ghost || !!span._plain || size < 38;
 
     const finalX = x+dx, finalY = y+dy;
     const metrics = ctx.measureText(span.word);
@@ -1637,7 +1637,7 @@ const TextRenderer = (() => {
      дубль уходит ЗА фигуру, читаемый текст остаётся ПЕРЕД ней. Раньше набор
      был неделим, поэтому за фигуру приходилось прятать его целиком вместе с
      дублем — и слово теряло хвост ровно там, где его надо читать. */
-  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null, shapeAt=null, pass=null) {
+  function draw(ctx, lyric, cx, cy, anim, fadeAlpha, color, font, fontSize, canvasWidth, t=0, globalBoxId=null, bounds=null, shapeAt=null, pass=null, opts=null) {
     // lyric.text уже очищен парсером (без /commands/, без {LFONT:...}, без empty-маркеров).
     // НИ В КОЕМ СЛУЧАЕ не фолбэчимся на rawText — пустой text это намеренное состояние
     // (техническая строка / маркер «(пусто)») и текст не должен рисоваться.
@@ -1679,6 +1679,25 @@ const TextRenderer = (() => {
     // относительно неё, поэтому куплет не вылезает за пределы кадра.
     const maxPossibleScale = 2.2;
     const spans    = parseSpans(text, color, t);
+
+    /* Ровный набор (перевод). Перевод — служебная подпись под строкой, а не
+       второй кинетический текст: дуотон, зерно, блик и пословные FX делают
+       из него вторую афишу, и кадр читается как два спорящих набора.
+       Поэтому здесь FX снимаются целиком, а заливка остаётся плоской —
+       единый стиль на все строки перевода. */
+    if (opts && opts.plain) {
+      for (const sp of spans) {
+        sp._plain = true;
+        sp.grad = sp.rainbow = sp.glitch = sp.glow = sp.neon = sp.outline = false;
+        sp.blur = sp.flicker = sp.wave = sp.shake = false;
+        sp.big  = sp.small  = false;
+        sp.color = color;
+        // Рамки перевод тоже не носит: подпись не должна перебивать строку.
+        if (typeof BoxRegistry !== 'undefined') {
+          for (const id of BoxRegistry.all.map(b => b.id)) sp[id] = false;
+        } else { sp.box = false; }
+      }
+    }
 
     /* Маску считаем в два прохода. Профиль фигуры меряется по ВЫСОТЕ БЛОКА,
        а высота известна только после переноса — который сам зависит от

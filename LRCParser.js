@@ -183,9 +183,16 @@ const LRCParser = (() => {
     const sepIdx = text.indexOf('>>>');
     if (sepIdx === -1) return null;
     // Очищаем перевод от line-style тегов и команд, но оставляем сам текст
+    /* Перевод — подпись в едином стиле, а не второй кинетический текст,
+       поэтому снимаем не только line-style теги и команды, но и ВСЮ
+       пословную разметку ({GLOW}, {BOX…}, **жирный**, _курсив_, ~~зачёрк~~).
+       Иначе половина перевода приезжала со своими FX и спорила со строкой. */
     const cleaned = text.slice(sepIdx + 3)
       .replace(LINE_STYLE_RE, '')
       .replace(/\/[^\/{}]+\//g, '')
+      .replace(/\{[^}]*\}/g, '')
+      .replace(/\*\*?|__?|~~?/g, '')
+      .replace(/\s{2,}/g, ' ')
       .trim();
     const stripped = _stripIfEmptyMarker(cleaned);
     return stripped || null;

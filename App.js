@@ -429,13 +429,16 @@ const App = (() => {
           const trSize = Math.max(14, Math.round(_effectiveSize * params.translationRatio));
           const trY    = (mainBottom ?? textY + _effectiveSize) + trSize * 0.9;
           const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
-          // Перевод следует за основным текстом по X (та же горизонтальная позиция)
+          /* Перевод следует за основным текстом по X (та же горизонтальная
+             позиция). Маску силуэта ему НЕ передаём: она двигала подпись
+             вбок от кадра к кадру, и перевод переставал стоять на месте.
+             opts.plain — ровный набор без FX (см. TextRenderer.draw). */
           TextRenderer.draw(
             ctx, { text: _lyric.translation },
             textX, trY,
             trAnim, _fadeA,
             params.translationColor, _effectiveFont, trSize, cw, t,
-            null, safe, _shapeAt
+            null, safe, null, null, { plain: true }
           );
         }
       }
