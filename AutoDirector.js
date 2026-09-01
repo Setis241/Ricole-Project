@@ -1942,6 +1942,27 @@ const AutoDirector = (function() {
         mass * 100 * (0.92 + secPunch * 0.28))));
       const half  = width / 2;
 
+      /* ── ЗАПАС ПОД СОБСТВЕННОЕ ДВИЖЕНИЕ ФИГУРЫ ──────────────────
+         Планировщик ставил фигуру ВПЛОТНУЮ к полю кадра (правый край на
+         98%) и тут же назначал ей эффект, который двигает её по
+         горизонтали. Сильнее всех — 'sway' у бриджа: он даёт до ±100·amt
+         пикселей смещения. Фигура уезжала за рамку и срезалась ровно там,
+         где код обещает «прижата к краю, но ЦЕЛИКОМ в кадре».
+
+         Место под движение обязан оставлять тот, кто это движение
+         назначил. Считаем запас от амплитуды эффекта и вычитаем его из
+         поля кадра — фигура встаёт чуть ближе к центру и в свои крайние
+         фазы больше не вылезает.
+
+         Амплитуды взяты из applyOverlayEffect в BackgroundEngine и указаны
+         в пикселях на единицу amt; проценты считаются от ширины кадра. */
+      const FX_SWING_PX = { sway: 100, shake: 40, spin: 30, stretch: 0,
+                            pulse: 0, float: 0, bounce: 0, static: 0 };
+      const _amt   = 0.20 + secPunch * 0.30;          // как в effectAmt ниже
+      const _swing = (FX_SWING_PX[secFx] || 0) * _amt;
+      // Полкадра запаса не бывает: движение — это акцент, а не переезд.
+      const margin = Math.min(12, (_swing / Math.max(320, _canvasWidth())) * 100);
+
       let x, textBand;
       if (place === 'center') {
         x = 50;
@@ -1951,10 +1972,10 @@ const AutoDirector = (function() {
         /* Фигура прижата к краю, но целиком в кадре. Обрез рамкой даёт
            прямую вертикаль по контуру — именно она читается наклейкой,
            а не композицией. Присутствие гасим планом и цветом, не обрезкой. */
-        x = side < 0 ? Math.round(EDGE + half) : Math.round(100 - EDGE - half);
+        x = side < 0 ? Math.round(EDGE + half + margin) : Math.round(100 - EDGE - half - margin);
         textBand = { a: EDGE, b: 100 - EDGE };
       } else {
-        x = side < 0 ? Math.round(EDGE + half) : Math.round(100 - EDGE - half);
+        x = side < 0 ? Math.round(EDGE + half + margin) : Math.round(100 - EDGE - half - margin);
         // Текст занимает вторую половину кадра — колонка, а не «остаток».
         textBand = side < 0
           ? { a: x + half + GAP, b: 100 - EDGE }
