@@ -745,7 +745,7 @@ const ExportEngine = (() => {
             const trY    = (mainBottom ?? textY + _exportSize) + trSize * 0.9;
             const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
             TextRenderer.draw(
-              offCtx, { text: _exportLyric.translation },
+              offCtx, { text: _exportLyric.translation, plain: true },
               textX, trY,
               trAnim, _exportFadeA,
               params.translationColor || '#999999', _exportFont, trSize, w, t,

@@ -431,7 +431,7 @@ const App = (() => {
           const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
           // Перевод следует за основным текстом по X (та же горизонтальная позиция)
           TextRenderer.draw(
-            ctx, { text: _lyric.translation },
+            ctx, { text: _lyric.translation, plain: true },
             textX, trY,
             trAnim, _fadeA,
             params.translationColor, _effectiveFont, trSize, cw, t,

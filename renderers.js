@@ -453,6 +453,26 @@ const TextRenderer = (() => {
     return { width: width || (span.word.trim()==='' ? size*0.3 : 0), size };
   }
 
+  /* ── Служебный набор (перевод): без декора ──
+     Перевод — подпись под строкой, а не второй набор. Любой градиент,
+     блик, зерно или свечение на нём превращают его в конкурента основному
+     тексту: на припеве, где основная строка и так крупная и цветная,
+     кадр начинает читаться как две равнозначные строки. Поэтому здесь
+     срезаются ВСЕ декоративные флаги — теги внутри перевода и стили,
+     унаследованные от строки, — и остаётся ровная заливка своим цветом. */
+  const DECOR_FLAGS = ['grad','rainbow','sheen','glow','neon','glitch','flicker',
+                       'wave','blur','outline','underline','strike','big','small',
+                       'box','boxneon','boxglass','boxshadow','boxtape','boxrough'];
+  function markPlain(spans, color) {
+    for (const sp of spans) {
+      for (const f of DECOR_FLAGS) if (sp[f]) sp[f] = false;
+      sp.boxId = null;
+      sp.color = color;
+      sp._plain = true;
+    }
+    return spans;
+  }
+
   /* ── Line-wrap spans into rows ── */
   function wrapSpans(ctx, spans, maxWidth, baseFontSize, font) {
     const rows=[]; let row=[]; let rowW=0;
@@ -964,7 +984,7 @@ const TextRenderer = (() => {
        — Мелкий кегль: перепад светлоты на высоте 20-30px съедает половину
          штриха, и подпись становится нечитаемой. Порог 38px — ниже него
          градиент физически некуда положить. */
-    const plainFill = !!span._ghost || size < 38;
+    const plainFill = !!span._ghost || !!span._plain || size < 38;
 
     const finalX = x+dx, finalY = y+dy;
     const metrics = ctx.measureText(span.word);
@@ -1263,6 +1283,7 @@ const TextRenderer = (() => {
     const wordSpans = [];
     if (!anim.perLetter) {
       const spans = parseSpans(rawText, color, t);
+      if (lyric && typeof lyric === 'object' && lyric.plain) markPlain(spans, color);
       for (const sp of spans) {
         const ws = sp.word.split(/\s+/).filter(Boolean);
         for (const w of ws) wordSpans.push({ ...sp, word: w });
@@ -1678,7 +1699,9 @@ const TextRenderer = (() => {
     // Перенос строк, авто-уменьшение шрифта и клампинг центра считаются
     // относительно неё, поэтому куплет не вылезает за пределы кадра.
     const maxPossibleScale = 2.2;
+    const _plainLine = !!(lyric && typeof lyric === 'object' && lyric.plain);
     const spans    = parseSpans(text, color, t);
+    if (_plainLine) markPlain(spans, color);
 
     /* Маску считаем в два прохода. Профиль фигуры меряется по ВЫСОТЕ БЛОКА,
        а высота известна только после переноса — который сам зависит от
