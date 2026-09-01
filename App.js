@@ -54,7 +54,29 @@ const App = (() => {
      существует только когда играет строка, и позвать её в нужный момент
      невозможно. */
   let _debugSnap = null;
+  /* Отдельная читалка рамки клипа: RicoleDebug требует уже отрисованного
+     кадра с текстом, а вопрос «почему нет вступления» задают ровно до того,
+     как что-то нарисовалось. Здесь видно всю цепочку: что решила режиссура,
+     что стоит в движке и активно ли оно прямо сейчас. */
   if (typeof window !== 'undefined') {
+    window.RicoleFraming = function() {
+      const be = (typeof BackgroundEngine !== 'undefined') ? BackgroundEngine : null;
+      if (!be || !be.getIntroMarker) return 'BackgroundEngine без рамки — старая версия файла в кеше браузера';
+      const t = (typeof AudioEngine !== 'undefined') ? AudioEngine.getCurrentTime() : 0;
+      const im = be.getIntroMarker(), em = be.getEndingMarker();
+      return {
+        строкРазобрано: lyrics.length,
+        перваяСпетая:   (lyrics.find(l => l.text && l.text.trim()) || {}).time,
+        аудио:          (typeof AudioEngine !== 'undefined' && AudioEngine.buffer)
+                          ? AudioEngine.duration.toFixed(1) + 'с' : 'не загружено',
+        названиеТитра:  introTitle || '(пусто — название берётся из имени аудиофайла)',
+        вступление:     im ? (im.start.toFixed(2) + '..' + im.end.toFixed(2) + 'с') : 'НЕ ПОСТАВЛЕНО',
+        прощание:       em ? (em.time.toFixed(2) + 'с, ' + em.duration.toFixed(1) + 'с') : 'НЕ ПОСТАВЛЕНО',
+        сейчас:         t.toFixed(2) + 'с',
+        интроАктивно:   be.getIntroState ? be.getIntroState(t).active : '—',
+        финалАктивен:   be.getEndingState ? be.getEndingState(t).active : '—',
+      };
+    };
     window.RicoleDebug = function() {
       const g = (typeof TextRenderer !== 'undefined') ? TextRenderer.lastFrameGuard : null;
       if (!_debugSnap) return 'кадр с текстом ещё не рисовался — включи воспроизведение';

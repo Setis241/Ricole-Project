@@ -2077,6 +2077,17 @@ const AutoDirector = (function() {
         if (whole >= FRAME_MIN_LEAD) hold = whole;
       }
 
+      /* Мёртвый кусок перед титром. Потолок hold отрезает карточку с
+         начала, и при проигрыше чуть длиннее потолка клип открывался
+         пустотой на пару секунд, а титр приходил уже «внутри» видео.
+         Короткий остаток карточка забирает себе: две секунды тишины
+         перед началом — это не выдержка, это ощущение, что видео
+         подвисло. Длинный остаток оставляем как есть — там пауза
+         работает. */
+      const gapBefore = lead - handoff - hold;
+      const swallowed = gapBefore > 0 && gapBefore <= 3;
+      if (swallowed) hold += gapBefore;
+
       if (hold >= FRAME_MIN_LEAD) {
         out.intro = {
           start:   Math.max(0, first.time - handoff - hold),
@@ -2084,7 +2095,12 @@ const AutoDirector = (function() {
           handoff: handoff,
           hold:    hold,
           energy:  e,
-          bars:    solidBpm ? +(hold / bar).toFixed(2) : null,
+          /* Кратность тактам теряется, когда карточка забрала остаток и
+             встала в самое начало клипа. Это не потеря: на долю обязано
+             попадать РАСКРЫТИЕ кадра (его держит handoff), а начало
+             карточки совпадает с началом видео — музыкального события
+             там нет вовсе. */
+          bars:    (solidBpm && !swallowed) ? +(hold / bar).toFixed(2) : null,
         };
       }
     }
