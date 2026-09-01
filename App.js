@@ -520,29 +520,42 @@ const App = (() => {
     if (typeof BackgroundManager !== 'undefined') {
       BackgroundManager.setLines(lyrics);
     }
-    // Ищем ending-маркер ([конец] / [end] / /КОНЕЦ ВИДЕО/) и регистрируем в Engine
+    // Рамка клипа — вступление и прощание. Ставит её АВТОРЕЖИССЁР:
+    // где начать и сколько держать, знает разбор (темп, энергия проигрыша,
+    // хвост музыки после последней строки), а не это место.
+    syncFraming();
+  }
+
+  /* Титры карточек — забота App (название берётся из имени аудиофайла),
+     время и темп — забота режиссуры. Поэтому здесь ставится текст, а
+     дальше слово отдаётся AutoDirector.frameFromLyrics.
+
+     Фолбэк на случай, если AutoDirector не подключён: тогда вступление
+     считается по первой СПЕТОЙ строке (секционные метки и пустые маркеры
+     стоят раньше и текста не несут — по ним кадр открывать нечего), а
+     прощание — по маркеру [конец], как и раньше. */
+  function syncFraming() {
+    if (!BackgroundEngine.setIntroMarker) return;
+    if (BackgroundEngine.setIntroTitle) {
+      BackgroundEngine.setIntroTitle(
+        introTitle    || _titleFromLyrics(),
+        introSubtitle || 'RICOLE / PROJECT');
+    }
+
+    if (typeof AutoDirector !== 'undefined' && AutoDirector.frameFromLyrics) {
+      AutoDirector.frameFromLyrics(lyrics);
+      return;
+    }
+
+    const first = lyrics.find(l => l.text && l.text.trim());
+    if (first) BackgroundEngine.setIntroMarker(0, first.time);
+    else       BackgroundEngine.clearIntroMarker();
+
     if (BackgroundEngine.setEndingMarker) {
       const end = lyrics.find(l => l.isEnding);
       if (end) BackgroundEngine.setEndingMarker(end.time);
       else     BackgroundEngine.clearEndingMarker();
     }
-    // Вступление: проигрыш до первой спетой строки. Разметки не требует —
-    // если проигрыш достаточно длинный, вступление есть; если нет, движок
-    // сам от него откажется (см. minLead в setIntroMarker).
-    syncIntroMarker();
-  }
-
-  /* Вступление считается от ПЕРВОЙ СПЕТОЙ строки, а не от первой строки
-     вообще: секционные метки и пустые маркеры стоят раньше и текста не
-     несут — по ним кадр открывать нечего. */
-  function syncIntroMarker() {
-    if (!BackgroundEngine.setIntroMarker) return;
-    const first = lyrics.find(l => l.text && l.text.trim());
-    if (!first) { BackgroundEngine.clearIntroMarker(); return; }
-    BackgroundEngine.setIntroMarker(0, first.time, {
-      title:    introTitle    || _titleFromLyrics(),
-      subtitle: introSubtitle || 'RICOLE / PROJECT',
-    });
   }
 
   /* Название берём из имени аудиофайла: отдельного поля под него в
@@ -676,7 +689,6 @@ const App = (() => {
       el.querySelector('.drop-name').textContent = f.name;
       // Название трека для карточки вступления — из имени файла.
       introTitle = _titleFromAudioName(f.name);
-      syncIntroMarker();
       try {
         await AudioEngine.loadBuffer(await f.arrayBuffer());
         el.classList.add('loaded');
@@ -685,6 +697,12 @@ const App = (() => {
           if (b) b.disabled = false;
         });
         setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
+        // Греем разбор трека: по нему режиссура ставит рамку клипа
+        // (темп, энергия проигрыша, хвост после последней строки).
+        if (typeof AutoDirector !== 'undefined' && AutoDirector.warmAudio) {
+          AutoDirector.warmAudio(AudioEngine.buffer);
+        }
+        syncFraming();
         // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
         if (typeof AudioStorage !== 'undefined') {
           AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
@@ -886,7 +904,10 @@ const App = (() => {
             el.querySelector('.drop-name').textContent = '↺ ' + file.name;
           }
           introTitle = _titleFromAudioName(file.name);
-          syncIntroMarker();
+          if (typeof AutoDirector !== 'undefined' && AutoDirector.warmAudio) {
+            AutoDirector.warmAudio(AudioEngine.buffer);
+          }
+          syncFraming();
           ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
             const b = document.getElementById(id);
             if (b) b.disabled = false;

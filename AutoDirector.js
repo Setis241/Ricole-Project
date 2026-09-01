@@ -2000,6 +2000,234 @@ const AutoDirector = (function() {
     return stage;
   }
 
+
+  /* ══════════════════════════════════════════════
+     РАМКА КЛИПА — вступление и прощание
+
+     Карточки вступления и финала сначала стояли мимо режиссуры: интро
+     заводилось от «первой строки минус 0.35 с», финал — от голого маркера
+     [конец] с фиксированными 14 секундами. То есть ровно те два места,
+     которые ОТКРЫВАЮТ и ЗАКРЫВАЮТ клип, ставились единственными во всём
+     проекте на глазок, мимо разбора, который уже посчитан.
+
+     А считать тут есть от чего. Проигрыш до первого слова размечен как
+     секция 'intro' ещё в buildStructure. Темп известен, значит известна и
+     доля — и кадр может открываться НА ДОЛЮ, а не за произвольные
+     0.35 с до строки. Энергия проигрыша известна тоже: громкое вступление
+     карточку не держит (музыка уже началась, титру надо уйти), тихое —
+     держит дольше. Хвост после последней спетой строки известен — значит
+     прощание можно уложить в реальную музыку, а не в константу.
+
+     Здесь же чинится вещь крупнее оформления: без маркера [конец] в тексте
+     финала не было ВООБЩЕ. Клип просто переставал играть. Если после
+     последней строки осталась музыка, прощание ставится само.
+  ══════════════════════════════════════════════ */
+
+  const FRAME_MIN_LEAD  = 4.0;    // короче проигрыш — вступления нет
+  const FRAME_MAX_LEAD  = 12.0;   // дольше — титр висит, а не играет
+  const FRAME_MIN_TAIL  = 6.0;    // музыки после текста меньше — финал не ставим сами
+  const FRAME_END_MIN   = 8.0;    // границы длительности прощания
+  const FRAME_END_MAX   = 15.0;
+
+  function planFraming(audio, lyr, sections, apply) {
+    const lines = (lyr && lyr.lines) || [];
+    const sung  = lines.filter(function(l) { return !!l.text; });
+    const dur   = audio ? audio.duration
+                        : (lines.length ? lines[lines.length - 1].end + 4 : 0);
+
+    /* Доля и такт. Квантование к музыке имеет смысл только если темп
+       ДЕЙСТВИТЕЛЬНО найден: при низкой уверенности bpm — это случайное
+       число, и «попадание на долю» по нему попадёт мимо заметнее, чем
+       честные секунды. */
+    const solidBpm = !!(audio && audio.bpm > 40 && audio.bpm < 220 &&
+                        audio.bpmConfidence > 0.35);
+    const beat = solidBpm ? 60 / audio.bpm : 0;
+    const bar  = beat * 4;
+    const out = { intro: null, ending: null, bpm: solidBpm ? audio.bpm : null };
+
+    /* ── ВСТУПЛЕНИЕ ────────────────────────────────────────────
+       Есть ли оно вообще — решает не App и не длина проигрыша сама по
+       себе, а разметка: секция 'intro' в начале структуры. */
+    const introSec = sections && sections.length && sections[0].type === 'intro'
+      ? sections[0] : null;
+    const first = sung[0];
+    if (first && first.time >= FRAME_MIN_LEAD && (!sections || !sections.length || introSec)) {
+      const lead = first.time;
+      /* Передача — на долю. Кадр должен раскрыться ровно на сильном
+         месте перед строкой, а не «незадолго до». На неизвестном темпе
+         остаётся четверть секунды: этого хватает, чтобы первое слово
+         пришло уже в чистый кадр. */
+      const handoff = solidBpm
+        ? Math.min(beat, lead * 0.25)
+        : Math.min(0.35, lead * 0.25);
+
+      /* Сколько держать титр. Громкий проигрыш — это уже сама песня, и
+         карточка в нём лишняя: держим коротко и уходим. Тихий вступительный
+         эмбиент карточку несёт — она в нём и есть событие. */
+      const e    = audio ? audio.energyAt(0, lead) : 0.5;
+      const want = e > 0.62 ? 6.0 : (e < 0.32 ? FRAME_MAX_LEAD : 9.0);
+      let   hold = Math.min(want, lead - handoff, FRAME_MAX_LEAD);
+      /* Целое число тактов — карточка живёт в размере трека, а не поперёк.
+         Округление именно ВНИЗ: вверх карточка залезла бы за собственный
+         предел и за начало трека. (Округление к ближайшему здесь молча не
+         работало вовсе: округлённое вверх значение тут же отбрасывалось
+         минимумом, и держалось исходное некратное.) */
+      if (solidBpm && bar > 0.5) {
+        const whole = Math.floor(hold / bar) * bar;
+        if (whole >= FRAME_MIN_LEAD) hold = whole;
+      }
+
+      if (hold >= FRAME_MIN_LEAD) {
+        out.intro = {
+          start:   Math.max(0, first.time - handoff - hold),
+          end:     first.time - handoff,
+          handoff: handoff,
+          hold:    hold,
+          energy:  e,
+          bars:    solidBpm ? +(hold / bar).toFixed(2) : null,
+        };
+      }
+    }
+
+    /* ── ПРОЩАНИЕ ──────────────────────────────────────────────
+       Явный [конец] — это решение автора, его время не трогаем: режиссура
+       подбирает только длительность и глубину затухания. Своё прощание
+       ставим лишь там, где автор ничего не сказал, а музыка после текста
+       ещё идёт. */
+    const marked = lines.find(function(l) { return l.entry && l.entry.isEnding; });
+    const lastSung = sung.length ? sung[sung.length - 1] : null;
+    let endStart = marked ? marked.time : null;
+
+    /* Сколько прощание должно длиться, ЕСЛИ музыка позволит. Считается
+       от энергии концовки трека, а не от остатка: остаток решает только,
+       влезет ли задуманное. Громкий финал закрывается быстрее — он уже
+       сказал своё; тихий стоит подержать, там весь смысл в паузе.
+       Энергия берётся по последним двадцати секундам трека: где именно
+       встанет карточка, ещё не решено, а характер концовки уже известен. */
+    const eTail = audio ? audio.energyAt(Math.max(0, dur - 20), dur) : 0.5;
+    const wantEnd = FRAME_END_MIN + (1 - Math.min(1, eTail)) * (FRAME_END_MAX - FRAME_END_MIN - 2) + 2;
+    const fitBars = function(sec) {
+      if (!solidBpm || bar <= 0.5) return sec;
+      const whole = Math.floor(sec / bar) * bar;
+      return whole >= FRAME_END_MIN ? whole : sec;
+    };
+    let d = null;
+
+    if (endStart == null && lastSung) {
+      // Отзвук последней строки: прощание вступает на музыкальном шве,
+      // а не обрывает её хвост.
+      const earliest = lastSung.end + (solidBpm ? Math.min(bar, 2.0) : 1.0);
+      if (dur - earliest >= FRAME_MIN_TAIL) {
+        /* Прощание живёт в КОНЦЕ трека, а не сразу за последним словом.
+           Если после текста осталось полминуты музыки, карточка, начатая
+           тут же, успевает догореть до чёрного задолго до конца — дальше
+           играет трек над пустым чёрным кадром. Поэтому цель — накрыть
+           последние d секунд, а шов после строки работает нижней границей:
+           раньше него не начинаем никогда. */
+        d = fitBars(Math.min(wantEnd, Math.max(FRAME_END_MIN, dur - earliest)));
+        endStart = Math.max(earliest, dur - d);
+      }
+    }
+
+    if (endStart != null) {
+      if (d == null) {
+        /* Явный [конец]: время автора не трогаем, длительность подбираем
+           по тому, сколько музыки он оставил после своего маркера. */
+        const tail = Math.max(0, dur - endStart);
+        d = fitBars(Math.min(wantEnd, Math.max(FRAME_END_MIN, tail)));
+      }
+
+      /* Глубина затухания — от того, что затухать. Громкий финал нельзя
+         гасить быстро: это не уход, а обрыв. Тихий, наоборот, незачем
+         тянуть — гасить там уже почти нечего. */
+      const eEnd = audio ? audio.energyAt(endStart, Math.min(dur, endStart + d)) : 0.5;
+      const fade = Math.max(0.24, Math.min(0.46, 0.24 + eEnd * 0.26));
+
+      out.ending = {
+        time: endStart, duration: d, fadeFrac: +fade.toFixed(3),
+        energy: eEnd, source: marked ? 'marker' : 'auto',
+        bars: solidBpm ? +(d / bar).toFixed(2) : null,
+      };
+    }
+
+    if (apply && typeof BackgroundEngine !== 'undefined') {
+      /* Титры карточек здесь НЕ трогаем: название трека знает App (оно из
+         имени файла), а режиссура отвечает за время и темп. Поэтому
+         setIntroMarker вызывается без title/subtitle — уже поставленный
+         текст сохраняется. */
+      if (BackgroundEngine.setIntroMarker) {
+        if (out.intro) {
+          BackgroundEngine.setIntroMarker(out.intro.start, first.time, {
+            handoff: out.intro.handoff,
+            minLead: FRAME_MIN_LEAD,
+            maxLead: FRAME_MAX_LEAD,
+          });
+        } else if (BackgroundEngine.clearIntroMarker) {
+          BackgroundEngine.clearIntroMarker();
+        }
+      }
+      if (BackgroundEngine.setEndingMarker) {
+        if (out.ending) {
+          BackgroundEngine.setEndingMarker(out.ending.time, {
+            duration: out.ending.duration,
+            fadeFrac: out.ending.fadeFrac,
+          });
+        } else if (BackgroundEngine.clearEndingMarker) {
+          BackgroundEngine.clearEndingMarker();
+        }
+      }
+    }
+
+    return out;
+  }
+
+  /* Рамка ставится и БЕЗ запуска всей режиссуры: вступление и финал нужны
+     любому клипу, а не только собранному кнопкой «Авторежиссёр». App зовёт
+     это на каждый разбор лирики — так карточки всегда стоят по музыке, а не
+     по константам. */
+  function frameFromLyrics(entries) {
+    if (!entries || !entries.length) {
+      if (typeof BackgroundEngine !== 'undefined') {
+        if (BackgroundEngine.clearIntroMarker)  BackgroundEngine.clearIntroMarker();
+        if (BackgroundEngine.clearEndingMarker) BackgroundEngine.clearEndingMarker();
+      }
+      return null;
+    }
+    const buffer = (typeof AudioEngine !== 'undefined') ? AudioEngine.buffer : null;
+    /* Разбор аудио — полный FFT по треку, и звать его отсюда нельзя: рамка
+       пересчитывается на каждый разбор лирики, в том числе по кнопке Play,
+       и трек в пару минут подвесил бы нажатие. Берётся только УЖЕ
+       посчитанный разбор — его греет warmAudio там, где пользователь и так
+       ждёт загрузки файла. Без разбора рамка всё равно встаёт, просто по
+       секундам, а не по долям. */
+    const audio = buffer ? _peekAudio(buffer) : null;
+    const dur   = audio ? audio.duration
+                        : (buffer ? buffer.duration : entries[entries.length - 1].time + 5);
+    const lyr   = analyzeLyrics(entries, dur);
+    const sections = buildStructure(audio, lyr);
+    return planFraming(audio, lyr, sections, true);
+  }
+
+  /* Греет разбор трека, чтобы рамка (и кнопка режиссуры) получили темп и
+     энергию мгновенно. Зовётся из App сразу после декодирования файла. */
+  function warmAudio(buffer) {
+    if (!buffer) return null;
+    try { return _cachedAudio(buffer); }
+    catch (e) { console.warn('AutoDirector.warmAudio failed:', e); return null; }
+  }
+
+  let _audioCache = null;
+  function _peekAudio(buffer) {
+    return (_audioCache && _audioCache.buffer === buffer) ? _audioCache.result : null;
+  }
+  function _cachedAudio(buffer) {
+    const hit = _peekAudio(buffer);
+    if (hit) return hit;
+    const result = analyzeAudio(buffer);
+    _audioCache = { buffer: buffer, result: result };
+    return result;
+  }
+
   /* Применяет разметку сцены к спрайту. apply=false — только отчёт. */
   function planCharacter(sections, lyr, bg, apply, stage) {
     const ov = findCharacterOverlay();
@@ -2115,7 +2343,8 @@ const AutoDirector = (function() {
     if (!entries.length) return { error: 'Не удалось разобрать лирику.' };
 
     const buffer = (typeof AudioEngine !== 'undefined') ? AudioEngine.buffer : null;
-    const audio  = buffer ? analyzeAudio(buffer) : null;
+    // Через кеш: тот же разбор потом достаётся быстрым путём рамки.
+    const audio  = buffer ? _cachedAudio(buffer) : null;
     const dur    = audio ? audio.duration : entries[entries.length - 1].time + 5;
 
     const lyr        = analyzeLyrics(entries, dur);
@@ -2134,10 +2363,13 @@ const AutoDirector = (function() {
     const score      = buildScore(audio, lyr, sections, { bg: bg, stage: stage });
     const character  = planCharacter(sections, lyr, bg, false, stage);
     const camera     = planCamera(sections, lyr, bg, false, character.plan);
+    // Рамка клипа — вступление и прощание. Считается от той же структуры,
+    // что и всё остальное: проигрыш в начале уже размечен секцией 'intro'.
+    const framing    = planFraming(audio, lyr, sections, false);
 
     return { audio: audio, lyrics: lyr, sections: sections, bg: bg,
              score: score, camera: camera, character: character,
-             stage: stage, entries: entries };
+             stage: stage, framing: framing, entries: entries };
   }
 
   /* Применяет результат: базовый стиль + партитура в поле лирики. */
@@ -2160,6 +2392,11 @@ const AutoDirector = (function() {
       el.dispatchEvent(new Event('input',  { bubbles: true }));
       el.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    /* Рамка ставится ПОСЛЕ подстановки партитуры в поле: если на событие
+       input кто-то перечитает лирику, он поставит рамку быстрым путём, и
+       результат полного разбора был бы им переписан. Здесь она встаёт
+       последней и на полном разборе. */
+    planFraming(result.audio, result.lyrics, result.sections, true);
     if (typeof PresetManager !== 'undefined' && PresetManager.scheduleAutosave)
       PresetManager.scheduleAutosave();
     return true;
@@ -2272,9 +2509,27 @@ const AutoDirector = (function() {
       body.appendChild(hint);
     }
 
+    /* Рамка клипа — единственное, что режиссура ставит МИМО поля лирики
+       (карточки живут в движке, а не тегами в тексте), поэтому её решение
+       иначе нигде не увидеть. */
+    const fr = r.framing || {};
+    const fmt = function(v) { return v.toFixed(1).replace('.0', '') + 'с'; };
+    status('ИНТРО', !!fr.intro,
+      fr.intro
+        ? ('карточка ' + fmt(fr.intro.hold) +
+           (fr.intro.bars ? ' (' + Math.round(fr.intro.bars) + ' такта)' : '') +
+           ', кадр открывается за ' + fr.intro.handoff.toFixed(2) + 'с до строки')
+        : 'проигрыша не хватило — вступления нет');
+    status('ФИНАЛ', !!fr.ending,
+      fr.ending
+        ? ('прощание с ' + fmt(fr.ending.time) + ', ' + fmt(fr.ending.duration) +
+           (fr.ending.source === 'marker' ? ' — от маркера [конец]' : ' — поставлен сам'))
+        : 'музыки после текста не осталось — финала нет');
+
     const note = document.createElement('div');
     note.style.cssText = 'font-size:8px;color:#666;line-height:1.5;margin:10px 0;';
-    note.textContent = 'Применение перезапишет поле лирики: текст и таймкоды сохранятся.';
+    note.textContent = 'Применение перезапишет поле лирики: текст и таймкоды сохранятся. ' +
+      'Вступление и финал ставятся в движок, поля лирики они не трогают.';
     body.appendChild(note);
 
     const apply = document.createElement('button');
@@ -2325,6 +2580,9 @@ const AutoDirector = (function() {
     countSyllables: countSyllables,
     planCamera:     planCamera,
     planStage:      planStage,
+    planFraming:      planFraming,
+    frameFromLyrics:  frameFromLyrics,
+    warmAudio:        warmAudio,
     planCharacter:  planCharacter,
     clearCharacterPlan: clearCharacterPlan,
     findCharacterOverlay: findCharacterOverlay,
