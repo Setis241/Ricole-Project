@@ -486,6 +486,8 @@ const ExportEngine = (() => {
       const t        = fi * dt;
       const freqData = freqFrames[fi];
       const bands    = localBands.analyze(freqData, sr, 1024, dt);
+      // Тот же спектр, что и в превью, иначе венец в экспорте не поедет.
+      if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 
       let newIdx = -1;
       for (let i = lyrics.length - 1; i >= 0; i--) {
@@ -682,6 +684,9 @@ const ExportEngine = (() => {
 
       if (_exportSceneApplied) offCtx.restore();
 
+      // Тот же дуотон на фон, что и в превью (см. App.js) — иначе файл разойдётся с окном.
+      TextRenderer.drawColorWash(offCtx, w, h, _exportColor);
+
       // Flash-overlay для рок/strobe пресетов (см. App.js)
       if (BackgroundEngine.applySceneFlash) {
         BackgroundEngine.applySceneFlash(offCtx, w, h, bands, t);
@@ -743,13 +748,12 @@ const ExportEngine = (() => {
           if (params.showTranslation && _exportLyric.translation) {
             const trSize = Math.max(14, Math.round(_exportSize * (params.translationRatio || 0.40)));
             const trY    = (mainBottom ?? textY + _exportSize) + trSize * 0.9;
-            const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
-            TextRenderer.draw(
-              offCtx, { text: _exportLyric.translation },
+            TextRenderer.drawTranslation(
+              offCtx, _exportLyric.translation,
               textX, trY,
-              trAnim, _exportFadeA,
-              params.translationColor || '#999999', _exportFont, trSize, w, t,
-              null, safe, _expShape
+              _exportFadeA,
+              params.translationColor || '#999999', _exportFont, trSize, w,
+              safe, _expShape
             );
           }
         }

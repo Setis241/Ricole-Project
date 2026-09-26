@@ -281,6 +281,108 @@ textarea:focus {
 }
 .mark-hint.visible { display: block; }
 
+/* WORD PASS */
+.word-panel {
+  display: none;
+  width: 100%;
+  max-width: 900px;
+  margin-top: 20px;
+  padding: 16px;
+  background: #0d0d0d;
+  border: 1px solid #222;
+  border-radius: 8px;
+  text-align: left;
+}
+.word-panel.visible { display: block; }
+.word-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.word-panel-title {
+  font-size: 9px;
+  text-transform: uppercase;
+  color: #666;
+  letter-spacing: 1px;
+  margin-right: auto;
+}
+.word-btn {
+  padding: 6px 12px;
+  background: #1a1a1a;
+  color: #e8ff00;
+  border: 1px solid #222;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  text-transform: uppercase;
+  font-family: monospace;
+}
+.word-btn:hover { background: #e8ff00; color: #000; }
+.word-canvas {
+  width: 100%;
+  height: 54px;
+  display: block;
+  cursor: pointer;
+  margin-bottom: 12px;
+}
+.word-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.word-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 10px;
+  background: #0a0a0a;
+  border: 1px solid #1a1a1a;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.word-chip:hover { border-color: #333; }
+.word-chip.active {
+  border-color: #e8ff00;
+  background: rgba(232, 255, 0, 0.06);
+}
+.word-chip-word {
+  font-size: 13px;
+  color: #ccc;
+}
+.word-chip.active .word-chip-word { color: #e8ff00; }
+.word-chip-time {
+  font-family: monospace;
+  font-size: 10px;
+  color: #666;
+}
+.word-chip-input {
+  font-family: monospace;
+  font-size: 10px;
+  color: #e8ff00;
+  background: #000;
+  border: 1px solid #e8ff00;
+  border-radius: 3px;
+  width: 58px;
+  padding: 1px 3px;
+  text-align: center;
+}
+.word-open {
+  background: none;
+  border: none;
+  color: #444;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+}
+.word-open:hover { color: #e8ff00; }
+.word-open.has-words { color: #e8ff00; }
+
 /* RESULTS */
 .results {
   width: 300px;
@@ -503,6 +605,10 @@ textarea:focus {
       <div><kbd>CTRL+Z</kbd> Undo</div>
       <div><kbd>← →</kbd> Seek ±2s</div>
       <div><kbd>[ ]</kbd> Speed ±0.1x</div>
+      <div style="margin-top:8px;color:#444;">Word pass:</div>
+      <div><kbd>🔤</kbd> Open on a timed line</div>
+      <div><kbd>TAB</kbd> Next word</div>
+      <div><kbd>SPACE</kbd> Set word at playhead</div>
     </div>
   </div>
 
@@ -527,6 +633,17 @@ textarea:focus {
       <div class="current-line" id="currentLine">—</div>
       <div class="next-line" id="nextLine"></div>
       <div class="mark-hint" id="markHint">Press SPACE to mark this line</div>
+
+      <div class="word-panel" id="wordPanel">
+        <div class="word-panel-head">
+          <span class="word-panel-title" id="wordPanelTitle">Word pass</span>
+          <button class="word-btn" id="wordPlayBtn">▶ Line</button>
+          <button class="word-btn" id="wordAutoBtn">↻ Auto</button>
+          <button class="word-btn" id="wordCloseBtn">✕ Close</button>
+        </div>
+        <canvas class="word-canvas" id="wordCanvas"></canvas>
+        <div class="word-chips" id="wordChips"></div>
+      </div>
     </div>
   </div>
 

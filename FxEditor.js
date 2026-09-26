@@ -57,9 +57,12 @@ const FxEditor = (() => {
     { label: '📐 Ragged',        value: 'ragged' },
     { label: '▦ Justify',       value: 'justify' },
     { label: '🅿 Poster',        value: 'poster' },
-    { label: '▩ Backdrop',      value: 'backdrop' },
-    { label: '⧉ Echo',          value: 'echo' },
+    { label: '▭ Title',         value: 'title' },
     { label: '⇹ Rift',          value: 'rift' },
+    { label: '▮ Monolith',      value: 'monolith' },
+    { label: '🏟 Anthem',       value: 'anthem' },
+    { label: '⚙ Ratchet',       value: 'ratchet' },
+    { label: '📈 Escalator',    value: 'escalator' },
     { label: '🎬 Montage',      value: 'montage' },
     { label: '🌊 Drift',        value: 'drift' },
     { label: '── Прокрутка ──', value: '',       disabled: true },
@@ -179,6 +182,21 @@ const FxEditor = (() => {
   // ── Camera scene presets (для UI вкладки СЦЕНЫ) ──
   // Сгруппированы по характеру эффекта. В UI рисуются как сетка с заголовками.
   const CAM_SCENE_GROUPS = [
+    {
+      name: 'КИНО',
+      desc: 'Один набор — одна камера; их ставит авторежиссёр',
+      presets: [
+        { value: 'cineEstablish', icon: '🎞', label: 'Establish', hint: 'общий план, вход' },
+        { value: 'cinePush',      icon: '➘',  label: 'Push',      hint: 'наезд до крупного' },
+        { value: 'cineSettle',    icon: '➚',  label: 'Settle',    hint: 'ответ, отпускает' },
+        { value: 'cineGlide',     icon: '⟶',  label: 'Glide',     hint: 'проводка без зума' },
+        { value: 'cineHit',       icon: '✱',  label: 'Hit',       hint: 'удар-наезд, вход в припев' },
+        { value: 'cineDrive',     icon: '▶',  label: 'Drive',     hint: 'держит крупный, дышит на бас' },
+        { value: 'cineLift',      icon: '↗',  label: 'Lift',      hint: 'разгон подводки' },
+        { value: 'cineRelease',   icon: '↙',  label: 'Release',   hint: 'выдох в общий план' },
+        { value: 'cineStill',     icon: '⏹',  label: 'Still',     hint: 'пауза' },
+      ],
+    },
     {
       name: 'УДАРЫ',
       desc: 'Резкий вход в кадр',
@@ -540,8 +558,11 @@ const FxEditor = (() => {
       const bgStr    = bgCmdsToString(line.bgCmds || {});
       const camStr   = camCmdsToString(line.camCmds || {});
       const styleStr = lineStyleToTags(line.lineStyle);
-      // порядок: timestamp → bg команды → camera команды → section → line-style → текст
-      return `[${line.time}] ${bgStr}${camStr}${section}${styleStr}${tagged}`;
+      // Порядок: timestamp → section → bg команды → camera команды → line-style → текст.
+      // Метка стоит ПЕРВОЙ не для красоты: LRCParser читает её только в
+      // начале строки (^\[...\]). Стоя после /КОМАНД/, она переставала
+      // распознаваться, и структура молча терялась на первом же прогоне.
+      return `[${line.time}] ${section}${bgStr}${camStr}${styleStr}${tagged}`;
     }).join('\n');
   }
 
@@ -788,6 +809,7 @@ const FxEditor = (() => {
   <div class="fxe-cs-panel" id="fxeCsPanel" style="display:none;">
     <div class="fxe-cs-toolbar">
       <button class="fxe-btn fxe-btn-accent" id="fxeAddCsBtn">+ Добавить сцену</button>
+      <button class="fxe-btn" id="fxeCsExpandBtn">⇕ Развернуть всё</button>
       <span class="fxe-cs-toolbar-hint">Каждая сцена — отдельный кинематографичный пресет камеры. Назначь набор строк → сцена применится автоматически.</span>
     </div>
     <div class="fxe-cs-content">
@@ -1937,7 +1959,16 @@ const FxEditor = (() => {
 .fxe-cs-list {
   height:100%;overflow-y:auto;padding:14px 16px;display:grid;
   grid-template-columns:repeat(auto-fill, minmax(360px, 1fr));gap:12px;
-  align-content:flex-start;
+  /* ВНИМАНИЕ: было align-content:flex-start — и это ломало панель, как только
+     карточек становилось больше, чем влезает в высоту окна. У grid-контейнера
+     с заданной высотой (height:100%) 'flex-start' не работает как 'start':
+     строки переставали расти по содержимому и делили высоту поровну — 48
+     карточек сжимались до 9 px каждая, наружу торчали одни заголовки, а
+     прокрутки не было вовсе (scrollHeight == clientHeight).
+     'start' + auto-rows по содержимому: строки держат высоту карточки,
+     список прокручивается. */
+  align-content:start;
+  grid-auto-rows:min-content;
 }
 .fxe-cs-list::-webkit-scrollbar{width:3px}
 .fxe-cs-list::-webkit-scrollbar-thumb{background:#222}
@@ -1956,8 +1987,25 @@ const FxEditor = (() => {
 .fxe-cs-card-head {
   display:flex;align-items:center;gap:8px;padding:9px 12px;
   background:linear-gradient(180deg, #11161f, #0c0f17);
-  border-bottom:1px solid #1a1f2a;
+  border-bottom:1px solid #1a1f2a;cursor:pointer;
 }
+.fxe-cs-caret {
+  font-size:9px;color:#456;flex-shrink:0;width:10px;text-align:center;
+}
+.fxe-cs-card.open .fxe-cs-caret { color:#00e5ff; }
+/* Свёрнутая сводка: видно и без раскрытия, что это за сцена */
+.fxe-cs-sum {
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:6px 12px 8px 34px;cursor:pointer;
+  font-family:'Space Mono',monospace;font-size:8px;letter-spacing:1px;
+  text-transform:uppercase;
+}
+.fxe-cs-sum-preset { color:#00e5ff; }
+.fxe-cs-sum-val    { color:#445566; }
+.fxe-cs-card.open .fxe-cs-sum { display:none; }
+/* Тело карточки — только в раскрытом виде */
+.fxe-cs-body { display:none; }
+.fxe-cs-card.open .fxe-cs-body { display:block; }
 .fxe-cs-en-chip {
   font-family:'Space Mono',monospace;font-size:7px;letter-spacing:1.5px;
   background:#0a0a0a;border:1px solid #2a2a2a;color:#555;
@@ -2635,6 +2683,19 @@ const FxEditor = (() => {
     if (addCsBtn) {
       addCsBtn.addEventListener('click', () => {
         BackgroundEngine.addCamScene({});
+        renderScenesPanel();
+      });
+    }
+
+    // Развернуть / свернуть все карточки сцен разом
+    const expandCsBtn = overlay.querySelector('#fxeCsExpandBtn');
+    if (expandCsBtn) {
+      expandCsBtn.addEventListener('click', () => {
+        const scenes = BackgroundEngine.camScenes || [];
+        const allOpen = scenes.length > 0 && scenes.every(sc => _csOpen.has(sc.id));
+        _csOpen.clear();
+        if (!allOpen) scenes.forEach(sc => _csOpen.add(sc.id));
+        expandCsBtn.textContent = allOpen ? '⇕ Развернуть всё' : '⇕ Свернуть всё';
         renderScenesPanel();
       });
     }
@@ -4687,7 +4748,17 @@ const FxEditor = (() => {
     tick();
   }
 
-  /* ── Camera Scenes Panel Render ─────────────── */
+  /* Какие карточки сцен раскрыты. Живёт вне рендера: панель перерисовывается
+     целиком на каждое изменение, и без этого раскрытая карточка схлопывалась
+     бы под руками на первом же движении ползунка. */
+  const _csOpen = new Set();
+
+  /* ── Camera Scenes Panel Render ───────────────
+     Карточки свёрнуты по умолчанию. Авторежиссёр ставит несколько десятков
+     сцен, а развёрнутая карточка — это ~370 px: полсотни таких дают стену в
+     18 000 px, по которой невозможно найти нужную сцену. В свёрнутом виде
+     строка отвечает на три вопроса сразу — что за движение, какой силы и на
+     скольких строках, — а настройки открываются по клику. */
   function renderScenesPanel() {
     const list = overlay.querySelector('#fxeCsList');
     if (!list) return;
@@ -4703,11 +4774,30 @@ const FxEditor = (() => {
     }
 
     scenes.forEach(scene => {
+      const isOpen = _csOpen.has(scene.id);
+
       const card = document.createElement('div');
-      card.className = 'fxe-cs-card' + (scene.enabled ? '' : ' disabled');
+      card.className = 'fxe-cs-card' + (scene.enabled ? '' : ' disabled') +
+                       (isOpen ? ' open' : '');
+
+      const body = document.createElement('div');
+      body.className = 'fxe-cs-body';
 
       const head = document.createElement('div');
       head.className = 'fxe-cs-card-head';
+      head.title = 'Клик — развернуть настройки сцены';
+      head.addEventListener('click', ev => {
+        // Клик по самим контролам шапки — не разворачивание.
+        if (ev.target.closest('input, button')) return;
+        if (_csOpen.has(scene.id)) _csOpen.delete(scene.id); else _csOpen.add(scene.id);
+        card.classList.toggle('open');
+        caret.textContent = _csOpen.has(scene.id) ? '▾' : '▸';
+      });
+
+      const caret = document.createElement('span');
+      caret.className = 'fxe-cs-caret';
+      caret.textContent = isOpen ? '▾' : '▸';
+      head.appendChild(caret);
 
       const enChip = document.createElement('button');
       enChip.className = 'fxe-cs-en-chip' + (scene.enabled ? ' on' : '');
@@ -4743,6 +4833,25 @@ const FxEditor = (() => {
 
       card.appendChild(head);
 
+      /* Сводка свёрнутой карточки: движение, сила, охват строк. */
+      const sum = document.createElement('div');
+      sum.className = 'fxe-cs-sum';
+      const sp = CAM_SCENE_PRESETS.find(p => p.value === scene.preset);
+      const spIcon  = sp ? sp.icon : '🎯';
+      const spLabel = sp ? sp.label.split(' · ')[0] : scene.preset;
+      const nLines  = (scene.selectedLines || []).length;
+      sum.innerHTML =
+        `<span class="fxe-cs-sum-preset">${spIcon} ${spLabel}</span>` +
+        `<span class="fxe-cs-sum-val">сила ${(scene.intensity ?? 0.5).toFixed(2)}</span>` +
+        `<span class="fxe-cs-sum-val">${nLines ? 'строк ' + nLines : 'строки не назначены'}</span>`;
+      sum.addEventListener('click', () => {
+        if (_csOpen.has(scene.id)) _csOpen.delete(scene.id); else _csOpen.add(scene.id);
+        card.classList.toggle('open');
+        caret.textContent = _csOpen.has(scene.id) ? '▾' : '▸';
+      });
+      card.appendChild(sum);
+      card.appendChild(body);
+
       // Текущий пресет (заголовок с иконкой) + кнопка-выбора, открывающая сетку
       const presetHeader = document.createElement('div');
       presetHeader.className = 'fxe-cs-preset-header';
@@ -4758,7 +4867,7 @@ const FxEditor = (() => {
         </div>
         <button class="fxe-cs-preset-toggle" type="button">сменить ▾</button>
       `;
-      card.appendChild(presetHeader);
+      body.appendChild(presetHeader);
 
       // Сетка пресетов (свернута по умолчанию)
       const presetGrid = document.createElement('div');
@@ -4796,7 +4905,7 @@ const FxEditor = (() => {
         presetGrid.appendChild(groupEl);
       });
 
-      card.appendChild(presetGrid);
+      body.appendChild(presetGrid);
 
       // Toggle expand/collapse
       const toggleBtn = presetHeader.querySelector('.fxe-cs-preset-toggle');
@@ -4829,17 +4938,17 @@ const FxEditor = (() => {
         row.appendChild(val);
         return row;
       };
-      card.appendChild(mkSlider('Сила',     'intensity', 0, 1,   0.05, v => v.toFixed(2)));
-      card.appendChild(mkSlider('Фокус X%', 'focusX',    0, 100, 1,    v => v.toFixed(0)));
-      card.appendChild(mkSlider('Фокус Y%', 'focusY',    0, 100, 1,    v => v.toFixed(0)));
+      body.appendChild(mkSlider('Сила',     'intensity', 0, 1,   0.05, v => v.toFixed(2)));
+      body.appendChild(mkSlider('Фокус X%', 'focusX',    0, 100, 1,    v => v.toFixed(0)));
+      body.appendChild(mkSlider('Фокус Y%', 'focusY',    0, 100, 1,    v => v.toFixed(0)));
 
       // ── Появление / исчезновение (per-scene) ──
       const fadeLabel = document.createElement('div');
       fadeLabel.className = 'fxe-cs-section-sublabel';
       fadeLabel.textContent = 'появление · исчезновение';
-      card.appendChild(fadeLabel);
-      card.appendChild(mkSlider('Заход',  'fadeIn',  0, 2.0, 0.05, v => v.toFixed(2) + 'с'));
-      card.appendChild(mkSlider('Выход',  'fadeOut', 0, 2.0, 0.05, v => v.toFixed(2) + 'с'));
+      body.appendChild(fadeLabel);
+      body.appendChild(mkSlider('Заход',  'fadeIn',  0, 2.0, 0.05, v => v.toFixed(2) + 'с'));
+      body.appendChild(mkSlider('Выход',  'fadeOut', 0, 2.0, 0.05, v => v.toFixed(2) + 'с'));
 
       // Easing — 3 кнопки smooth/linear/snap
       const easeRow = document.createElement('div');
@@ -4864,7 +4973,7 @@ const FxEditor = (() => {
         easeWrap.appendChild(b);
       });
       easeRow.appendChild(easeWrap);
-      card.appendChild(easeRow);
+      body.appendChild(easeRow);
 
       // Кнопка «сброс к дефолтам пресета»
       const resetBtn = document.createElement('button');
@@ -4877,7 +4986,7 @@ const FxEditor = (() => {
         }
         renderScenesPanel();
       });
-      card.appendChild(resetBtn);
+      body.appendChild(resetBtn);
 
       const linesRow = document.createElement('div');
       linesRow.className = 'fxe-cs-lines-row';
@@ -4889,7 +4998,7 @@ const FxEditor = (() => {
         : `🎯 Назначить строки`;
       linesBtn.addEventListener('click', () => openLineSelectorPanel('scene', scene.id));
       linesRow.appendChild(linesBtn);
-      card.appendChild(linesRow);
+      body.appendChild(linesRow);
 
       list.appendChild(card);
     });

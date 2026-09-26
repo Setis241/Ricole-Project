@@ -667,6 +667,149 @@ const BackgroundEngine = (() => {
         shakeX: 0, shakeY: 0,
       };
     },
+
+    /* ═══ КИНО-НАБОР (его ставит авторежиссёр) ═══════════════════════════
+
+       Прошлый набор авторежиссёра был собран из отдельных трюков: swing
+       качал кадр на ±18°, dutchTilt держал наклон, prism крутил и болтал
+       на двух частотах, flicker семь раз за строку телепортировал кадр,
+       scan бил белой вспышкой, staircase щёлкал и тряс. Каждый по
+       отдельности — эффект. Подряд, по строке на каждый — это не съёмка,
+       а перебор фильтров: между соседними строками не было НИ ОДНОЙ общей
+       величины, поэтому на каждой склейке кадр прыгал в новый масштаб, в
+       новый угол и в новый характер движения. Отсюда «бессвязность»:
+       связывать было нечем.
+
+       Этот набор — одна камера, а не девять. Держат его вместе три вещи:
+
+       1. ОБЩАЯ ЛЕСТНИЦА КРУПНОСТИ. Все сцены живут между тремя планами:
+          общий 1.06, средний 1.20, крупный 1.34. Каждая сцена НАЧИНАЕТСЯ
+          на одном из них и ЗАКАНЧИВАЕТСЯ на другом, поэтому следующая
+          продолжает с того же места и склейка строк перестаёт быть
+          скачком масштаба. Порядок сцен внутри секции собирает не список
+          наугад, а арка (AutoDirector.buildArc), которая эту лестницу
+          соблюдает.
+
+       2. ОДНО ДВИЖЕНИЕ НА СЦЕНУ. Внутри строки камера делает ровно одно:
+          едет, наезжает, отпускает или стоит. Никаких наложенных синусов
+          с разными периодами — именно они читаются как болтанка.
+
+       3. НИКАКОГО ВРАЩЕНИЯ КАДРА. rot = 0 везде. Оборот фона выглядит
+          заставкой, а не съёмкой, и ломает вертикаль текста.
+
+       Тряска допущена в одной сцене (cineHit) и только как отдача удара,
+       затухающая за первые 12% строки. Бас модулирует крупность на доли
+       процента и нигде не является самим движением.
+
+       Потолок держится ниже 1.45: выше спрайт переднего плана (camFollow)
+       начинает выходить за рамку — см. EDGE в AutoDirector.planStage. */
+
+    // 🎞 Establish — открывающий кадр: общий план, едва заметный подход
+    //    к точке интереса. Первая строка спокойной секции.
+    cineEstablish(p, s) {
+      const e  = sceneEase.inOut(p);
+      const z  = 1.06 + 0.08 * s.intensity * e;
+      const fx = 50 + (s.focusX - 50) * 0.30 * e;
+      const fy = 50 + (s.focusY - 50) * 0.30 * e;
+      return { zoom: z, focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ➘ Push — наезд общий→крупный, ровно и до конца строки.
+    //    Заканчивается на крупном: следующей строкой идёт cineSettle.
+    cinePush(p, s) {
+      const e  = sceneEase.inOut(p);
+      const z  = 1.16 + (0.18 * s.intensity) * e;   // старт = где оставил Settle
+      const fx = 50 + (s.focusX - 50) * e;
+      const fy = 50 + (s.focusY - 50) * e;
+      return { zoom: z, focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ➚ Settle — ответная строка: отпускает крупность обратно к среднему.
+    //    Стартует ровно там, где закончил push, — склейки не видно.
+    cineSettle(p, s) {
+      const e  = sceneEase.out(p);
+      const z  = (1.16 + 0.18 * s.intensity) - (0.13 * s.intensity) * e;  // точно с конца Push
+      const fx = s.focusX + (50 - s.focusX) * 0.6 * e;
+      const fy = s.focusY + (50 - s.focusY) * 0.6 * e;
+      return { zoom: Math.max(1, z), focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ⟶ Glide — проводка: крупность не меняется вовсе, камера ровно едет
+    //    поперёк кадра через точку интереса. Линейно, без разгона и
+    //    торможения, иначе движение читается как ещё один зум. Сторона
+    //    захода берётся от focusX, поэтому строки с разными фокусами
+    //    едут в разные стороны, а не одинаково.
+    cineGlide(p, s) {
+      const side = (s.focusX >= 50) ? 1 : -1;
+      const span = 20 + 10 * s.intensity;           // % ширины кадра
+      const fx   = s.focusX - side * span * (0.5 - p);
+      const fy   = s.focusY + (p - 0.5) * 4;        // едва заметный снос по вертикали
+      const z    = 1.20 + 0.06 * s.intensity;
+      return { zoom: z, focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ✱ Hit — вход в припев: удар-наезд за первую пятую строки, дальше
+    //    камера ДЕРЖИТ крупный план и чуть отпускает к концу.
+    cineHit(p, s, bands) {
+      /* ТРЯСКИ НА СТРОКЕ БОЛЬШЕ НЕТ.
+         Здесь стояла «отдача удара» — синус на 190 рад, затухающий за
+         первые 12% строки. В цифрах это доли процента кадра, а в кадре —
+         судорога ровно в тот момент, когда строка появилась: текст
+         выезжает, кадр дёргается, потом отпускает. Читается это не как
+         удар, а как сбой синхронизации: сначала показали, потом подстроили.
+         Удар в припеве делает НАЕЗД (kick ниже, 0→0.20 за пятую часть
+         строки) и сам набор; камере трястись под ним не нужно.
+         Отпускание тоже убрано (было -0.05 к концу): именно оно читалось
+         как «а теперь отъезжаем». Припев держит крупность до конца строки
+         и отдаёт её следующей сцене там, где положено, — на склейке. */
+      const kick = sceneEase.out(Math.min(1, p / 0.22));
+      const z = 1.20 + (0.20 * s.intensity) * kick
+                     + (bands ? bands.bass : 0) * 0.04;
+      const fx = 50 + (s.focusX - 50) * kick;
+      const fy = 50 + (s.focusY - 50) * kick;
+      return { zoom: z, focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ▶ Drive — рабочая строка припева: крупный план держится, дышит на
+    //    бас и медленно сносится в сторону. Ровно столько движения,
+    //    чтобы кадр был живой: удары в припеве делает cineHit, не эта.
+    cineDrive(p, s, bands) {
+      const side = (s.focusX >= 50) ? 1 : -1;
+      const z    = 1.26 + (bands ? bands.bass : 0) * 0.07 * s.intensity;
+      const fx   = s.focusX - side * 8 * s.intensity * (0.5 - p);
+      return { zoom: z, focusX: fx, focusY: s.focusY, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ↗ Lift — подводка: наезд С РАЗГОНОМ (easeIn). Крупность растёт
+    //    быстрее, чем ухо ждёт, — это и есть ощущение набора перед
+    //    припевом. Отдаёт кадр на крупном плане прямо в руки cineHit.
+    cineLift(p, s) {
+      const e  = sceneEase.in(p);
+      const z  = 1.20 + (0.22 * s.intensity) * e;
+      const fx = 50 + (s.focusX - 50) * e;
+      const fy = 50 + (s.focusY - 50) * e - 4 * e;   // взгляд чуть поднимается
+      return { zoom: z, focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ↙ Release — выдох: крупный план отпускается в общий, фокус
+    //    возвращается в центр. Закрывает секцию и готовит следующую,
+    //    которая начнётся с общего плана.
+    cineRelease(p, s) {
+      const e  = sceneEase.inOut(p);
+      const z  = (1.20 + 0.08 * s.intensity) - (0.14 + 0.08 * s.intensity) * e;
+      const fx = s.focusX + (50 - s.focusX) * e;
+      const fy = s.focusY + (50 - s.focusY) * e;
+      return { zoom: Math.max(1.02, z), focusX: fx, focusY: fy, rot: 0, shakeX: 0, shakeY: 0 };
+    },
+
+    // ⏹ Still — пауза: средний план, дыхание амплитудой полтора процента
+    //    за шесть секунд. Это не эффект, это возможность НЕ двигаться,
+    //    которой в прошлом наборе не было ни одной.
+    cineStill(p, s, bands, t) {
+      const breath = (Math.sin(t * (Math.PI / 3)) + 1) / 2;
+      const z = 1.18 + 0.015 * s.intensity * breath;
+      return { zoom: z, focusX: s.focusX, focusY: s.focusY, rot: 0, shakeX: 0, shakeY: 0 };
+    },
   };
 
   function setLineCamScene(scene, lineStartSec, lineDurSec, meta) {
@@ -783,6 +926,25 @@ const BackgroundEngine = (() => {
 
      Поэтому передний план получает ту же самую трансформацию с
      коэффициентом: тот же ритм, та же фаза удара, меньше амплитуда. */
+  /* ПОТОЛОК ЗУМА — общий на все пресеты.
+     Каждый пресет считал зум сам, и по отдельности каждый выглядел разумно:
+     crashZoom 1+1.35, vertigo 1+1.10, punchIn 1+1.40. На полной интенсивности
+     это наезд в 2.3–2.4 раза — фон превращается в текстуру, фигура упирается
+     в края, а кадр теряет то, ради чего в него смотрят. Правильное место
+     лечения — здесь, а не в двадцати пресетах: они остаются как есть и
+     продолжают отличаться друг от друга.
+
+     Кривая мягкая: слабые движения проходят почти нетронутыми (0.10 → 0.09),
+     сильные упираются в потолок (0.60 → 0.37, 1.35 → 0.50). Разница между
+     «наехал» и «влетел» сохраняется, а абсолютная величина — нет.
+     Панорама завязана на (zoom-1), поэтому ужимается заодно. */
+  const ZOOM_CEIL = 0.55;
+  function _zoomCeil(z) {
+    const over = z - 1;
+    if (over <= 0.001) return z;
+    return 1 + ZOOM_CEIL * (1 - Math.exp(-over / ZOOM_CEIL));
+  }
+
   function applySceneTransform(ctx, cw, ch, bands, t, k) {
     const strength = (k == null) ? 1 : Math.max(0, Math.min(1, k));
     if (strength < 0.001) return false;
@@ -791,7 +953,7 @@ const BackgroundEngine = (() => {
 
     // Лерпим к нейтрали в зависимости от blend и от силы плана
     const blend = sv.blend * strength;
-    const zoom  = 1 + (sv.zoom - 1) * blend;
+    const zoom  = 1 + (_zoomCeil(sv.zoom) - 1) * blend;
     if (Math.abs(zoom - 1) < 0.001 && Math.abs(sv.rot) < 0.0005 &&
         Math.abs(sv.shakeX) < 0.5 && Math.abs(sv.shakeY) < 0.5 &&
         Math.abs(sv.focusX - 50) < 0.5 && Math.abs(sv.focusY - 50) < 0.5) {
@@ -826,11 +988,11 @@ const BackgroundEngine = (() => {
      диссонанс: задник едет, наклейка стоит.
 
 
-     Поэтому объект может объявить свой ov.camFollow, и тогда его готовый
-     кадр кладётся на холст не с общей трансформацией переднего плана, а со
-     своей. Работает потому, что каждый объект сперва рисуется на временный
-     холст и лишь затем блитится — подменить трансформацию нужно только на
-     сам блит. */
+     ОТМЕНЕНО. Отдельная камера у объекта разъезжалась с кадром сильнее,
+     чем лечила: см. развёрнутый разбор в _renderOv (drawOverlaysAll).
+     Объекты едут в общей камере переднего плана вместе с набором.
+     _fgCamBase / setForegroundCam оставлены как точка входа, но никем
+     больше не читаются. */
   let _fgCamBase = null;   // матрица холста ДО камеры переднего плана
   let _fgCamK    = null;   // коэффициент, с которым эта камера применена
   /* Во сколько раз бас сейчас растянул ФОН (1 = баса нет). Пишется в
@@ -1028,9 +1190,24 @@ const BackgroundEngine = (() => {
     return s;
   }
 
+  /* Побеждает САМАЯ УЗКАЯ сцена, а не первая по списку.
+     Раньше здесь стоял find(): одна ручная сцена, накинутая на весь текст,
+     молча съедала все точечные сцены ниже по списку — в том числе всё, что
+     ставит автогрежиссёр. Снаружи это выглядит как «автосцены не работают»:
+     они есть, они включены, но до кадра не доходит ни одна.
+     Узкая привязка — это более конкретное намерение, чем «фон на всю песню»,
+     поэтому она и должна выигрывать. При равной ширине берём последнюю:
+     поставленное позже переопределяет поставленное раньше. */
   function findCamSceneForLine(lineIdx) {
     if (lineIdx == null || lineIdx < 0) return null;
-    return camScenes.find(s => s.enabled && (s.selectedLines || []).includes(lineIdx)) || null;
+    let best = null, bestW = Infinity;
+    for (const s of camScenes) {
+      if (!s.enabled) continue;
+      const sel = s.selectedLines || [];
+      if (!sel.includes(lineIdx)) continue;
+      if (sel.length <= bestW) { best = s; bestW = sel.length; }
+    }
+    return best;
   }
 
   // ═══════════════════════════════════════════════
@@ -4904,6 +5081,288 @@ const BackgroundEngine = (() => {
     return ctx.createPattern(_grainTileBG, 'repeat');
   }
 
+  /* ══ РЕЗОНАНС ФИГУРЫ ═══════════════════════════════════════════════
+     От фигуры должно идти ощущение, что музыка её ТРЯСЁТ, а не что рядом
+     кто-то включил анимированный круг. Поэтому волна здесь — не круг и не
+     кольцо: это КОНТУР САМОЙ ФИГУРЫ, отпущенный наружу. Силуэт собаки с
+     гитарой, разошедшийся на полкадра и погасший, читается как звук,
+     который она издала. Круг читался бы виджетом эквалайзера.
+
+     Контур строится один раз на картинку и кэшируется: силуэт «раздувается»
+     двадцатью смещёнными копиями, заливается цветом по своей альфе, и из
+     него вычитается сама фигура — остаётся ровно обводка формы. Дальше
+     каждый кадр это готовое изображение только масштабируется, то есть
+     стоимость волны — один drawImage на кольцо.
+
+     Кольца РОЖДАЮТСЯ НА УДАРЕ, а не крутятся по таймеру. Ни одного
+     Math.sin(t) в амплитуде: в тишине от фигуры не идёт ничего, и это
+     принципиально — иначе кадр снова читается зацикленной картинкой.
+     Дрожь даёт верх микса: кольцо на лету слегка «плывёт» по осям.
+  ══════════════════════════════════════════════════════════════════ */
+  const RES_W    = 420;   // ширина внутреннего холста контура, px
+  const RES_DIRS = 20;    // смещённых копий при «раздувании» силуэта
+
+  function _resonanceContour(ov, color, thick) {
+    const key = ov.img.src + '|' + color + '|' + thick;
+    if (ov._resCache && ov._resKey === key) return ov._resCache;
+    try {
+      const ar  = (ov.img.naturalWidth || 1) / (ov.img.naturalHeight || 1);
+      const W   = RES_W;
+      const H   = Math.max(8, Math.round(W / (ar || 1)));
+      const pad = Math.max(2, Math.round(thick));
+      const cv  = document.createElement('canvas');
+      cv.width  = W + pad * 2;
+      cv.height = H + pad * 2;
+      const c = cv.getContext('2d');
+      for (let i = 0; i < RES_DIRS; i++) {
+        const a = i / RES_DIRS * Math.PI * 2;
+        c.drawImage(ov.img, pad + Math.cos(a) * pad, pad + Math.sin(a) * pad, W, H);
+      }
+      // Единый цвет по альфе раздутого пятна: волна — свет, а не фотография.
+      c.globalCompositeOperation = 'source-in';
+      c.fillStyle = color;
+      c.fillRect(0, 0, cv.width, cv.height);
+      // Вычитаем саму фигуру — остаётся только её обводка.
+      c.globalCompositeOperation = 'destination-out';
+      c.drawImage(ov.img, pad, pad, W, H);
+      c.globalCompositeOperation = 'source-over';
+      cv._srcW = W; cv._srcH = H;
+      ov._resCache = cv;
+      ov._resKey   = key;
+      return cv;
+    } catch (e) {
+      /* Тот же «протухший» канвас, что и у силуэта (см. _buildSilhouette):
+         на file:// blob:-картинка пачкает холст. Контуру getImageData не
+         нужен, но drawImage чужой картинки в кэш-канвас может упасть по
+         другой причине — тогда просто нет волны, а не нет кадра. */
+      return null;
+    }
+  }
+
+  /* Обводка + разлетающиеся кольца. ctx — временный холст ЭТОГО объекта
+     (см. drawOverlays), поэтому composite здесь ничего чужого не заденет.
+     Всё кладётся через destination-over: волна обязана оказаться ПОД
+     фигурой, а рисуем мы её после — уже после tint/grade/feather, иначе
+     тонировка и фактура сцены легли бы и на кольца тоже. */
+  function _drawResonance(ctx, ov, cx, cy, drawW, drawH, flip, bands, t, dt, amt) {
+    const color = ov.resonanceColor || ov.tint || '#7fe0ff';
+    const thick = 5 + 12 * amt;
+    const cv = _resonanceContour(ov, color, thick);
+    if (!cv) return;
+
+    const st = ov._res || (ov._res = { rings: [], last: -1, env: 0, avg: 0, armed: true, idle: 0 });
+    // Перемотка назад: время пошло вспять — гасим накопленное, иначе новые
+    // удары не родят ни одного кольца, пока t не догонит старую отметку.
+    if (t < st.last) { st.last = -1; st.rings.length = 0; }
+
+    const bass = bands.bass || 0;
+    const high = bands.high || 0;
+    const all  = bands.overall || 0;
+    st.env += (bass - st.env) * Math.min(1, dt * 12);
+    // Медленное среднее (~1 c) — по нему и меряется удар.
+    st.avg += (bass - st.avg) * Math.min(1, dt * 1.1);
+
+    /* Порог АДАПТИВНЫЙ, и это здесь главное. Прошлая версия ловила удар
+       сравнением с предыдущим кадром (bass > prev + 0.04): bands приходят
+       сглаженными, за кадр бас столько не набирает почти никогда, и после
+       первого же кольца (на старте, когда prev был нулём) фигура замолкала
+       навсегда. Теперь удар — это превышение СОБСТВЕННОГО среднего трека,
+       то есть то же, что слышит ухо, а не разница двух соседних кадров. */
+    const thr = Math.max(0.10, st.avg * 1.22);
+    const emit = function(pow) {
+      st.last = t;
+      st.idle = t;
+      st.rings.push({ p: 0, pow: pow, seed: Math.random() * 6.28 });
+      if (st.rings.length > 7) st.rings.shift();
+    };
+    if (st.armed && bass > thr && (t - st.last) > 0.12) {
+      emit(0.55 + bass * 0.85);
+      st.armed = false;                 // до отпускания второй раз не бьём
+    }
+    if (bass < thr * 0.80) st.armed = true;
+
+    /* Ровное место без выраженных ударов (тянущийся бридж, гитарная стена)
+       — звук есть, а фронта нет. Держим редкий пульс от общей громкости:
+       амплитуда всё равно ЧИСТАЯ ФУНКЦИЯ ЗВУКА, в тишине не идёт ничего. */
+    if (all > 0.12 && (t - st.idle) > 0.55) emit(0.35 + all * 0.55);
+    if (t < st.idle) st.idle = t;
+
+    for (let i = 0; i < st.rings.length; i++) {
+      st.rings[i].p += dt * (0.80 + st.rings[i].pow * 0.40);
+    }
+    st.rings = st.rings.filter(function(r) { return r.p < 1; });
+
+    // Пропорции контурного холста: паддинг добавлен в пикселях, поэтому по
+    // осям он даёт РАЗНУЮ долю — считаем каждую ось отдельно, иначе обводка
+    // съезжает с фигуры на вытянутых картинках.
+    const kw = cv.width  / cv._srcW;
+    const kh = cv.height / cv._srcH;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-over';
+
+    const put = function(sx, sy, alpha) {
+      if (alpha <= 0.004) return;
+      const w = drawW * kw * sx;
+      const h = drawH * kh * sy;
+      ctx.globalAlpha = Math.min(1, alpha);
+      ctx.save();
+      ctx.translate(cx, cy);
+      if (flip < 0) ctx.scale(-1, 1);
+      ctx.drawImage(cv, -w / 2, -h / 2, w, h);
+      ctx.restore();
+    };
+
+    /* Сначала — сама обводка по фигуре: та самая «маска», от которой волна
+       и отрывается. Рисуется первой, потому что destination-over уводит
+       каждый следующий слой ГЛУБЖЕ: обводка остаётся вплотную к фигуре,
+       кольца уходят за неё. */
+    put(1, 1, (0.20 + st.env * 0.55) * amt);
+
+    for (let i = 0; i < st.rings.length; i++) {
+      const r = st.rings[i];
+      const e = 1 - Math.pow(1 - r.p, 2.2);          // разлёт с торможением
+      const s = 1 + e * (0.20 + r.pow * 0.42) * amt;
+      // Дрожь: верх микса ведёт кольцо по осям врозь — форма «плывёт».
+      const w = 1 + high * 0.06 * Math.sin(t * 21 + r.seed);
+      put(s * w, s / w, Math.pow(1 - r.p, 1.7) * r.pow * 0.85 * amt);
+    }
+
+    ctx.restore();
+  }
+
+  /* ══ СПЕКТРАЛЬНЫЙ ВЕНЕЦ ФИГУРЫ ═════════════════════════════════════
+     Эквалайзер, но НЕ полоской внизу кадра: полосы растут прямо из
+     контура персонажа наружу, по нормали к силуэту. Основания палок
+     спрятаны за самой фигурой (рисуем через destination-over), поэтому
+     видно только то, что выехало из-за неё — читается как звук, который
+     физически трясёт фигуру, а не как виджет плеера рядом с ней.
+
+     Точки берутся из того же профиля силуэта, что и маска текста
+     (_silhouetteOf): левый и правый край на каждой из SIL_ROWS высот.
+     Нормаль считается по соседним рядам, поэтому на плечах и у головы
+     палки уходят вбок-вверх, а не строго горизонтально.
+
+     Спектр приходит извне (setSpectrum) — тот же Uint8Array, что кормит
+     VU-метры в App.js и покадровый экспорт. Сглаживание по времени своё:
+     сырой FFT мерцает, и без него венец кипит.
+  ══════════════════════════════════════════════════════════════════ */
+  let _spectrum = null;
+  function setSpectrum(data) { _spectrum = data; }
+
+  function _drawSpectrumCrown(ctx, ov, cx, cy, drawW, drawH, flip, bands, t, dt, amt) {
+    const spec = _spectrum;
+    if (!spec || !spec.length) return;
+    const rows = _silhouetteOf(ov);
+    if (!rows) return;
+
+    const N    = SIL_ROWS;
+    const left = cx - drawW / 2;
+    const top  = cy - drawH / 2;
+    const rowH = drawH / N;
+
+    // Сглаженные уровни: по две точки на ряд (левый край и правый).
+    const M = N * 2;
+    let sm = ov._crownSm;
+    if (!sm || sm.length !== M) sm = ov._crownSm = new Float32Array(M);
+    /* ── АРУ по каждой точке венца ──
+       Без неё лучи и стояли статичным веером. getByteFrequencyData отдаёт
+       уровень в ДЕЦИБЕЛАХ, а не в линейной амплитуде: в сведённом треке
+       низ почти всё время упирается в 240..255, а верх лежит около нуля.
+       Палка «255» — это палка максимальной длины КАЖДЫЙ кадр, то есть
+       ровно неподвижная. Поэтому каждая точка ведёт собственный потолок
+       (медленно спадающий пик) и собственный пол (медленно всплывающий
+       минимум) и растягивает свой бин на весь диапазон: шевелится то, что
+       реально меняется, а не то, что просто громкое. */
+    let pk = ov._crownPk, fl = ov._crownFl;
+    if (!pk || pk.length !== M) { pk = ov._crownPk = new Float32Array(M).fill(0.25); }
+    if (!fl || fl.length !== M) { fl = ov._crownFl = new Float32Array(M); }
+
+    /* Раскладка бинов ЛОГАРИФМИЧЕСКАЯ и симметричная: низ — у ног, верх
+       спектра — у головы, и одинаково с обеих сторон. Линейная раскладка
+       отдавала девять десятых контура верхам, где почти всегда тихо, и
+       венец шевелился только у пола. */
+    const bins = Math.min(spec.length, 512);
+    const idxOf = function(k) {           // k: 0..1 снизу вверх
+      return Math.min(bins - 1, Math.floor(Math.pow(k, 1.9) * bins * 0.62));
+    };
+
+    const color = ov.resonanceColor || ov.tint || '#7fe0ff';
+    const rise  = Math.min(1, dt * 22);   // атака — быстрая
+    const fall  = Math.min(1, dt * 9);    // спад — с коротким послезвучием
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-over';
+    ctx.lineCap = 'round';
+
+    for (let r = 0; r < N; r++) {
+      const row = rows[r];
+      if (!row) continue;
+      const a = flip < 0 ? 1 - row.b : row.a;
+      const b = flip < 0 ? 1 - row.a : row.b;
+      const y = top + (r + 0.5) * rowH;
+
+      // Нормаль по соседним рядам: на плечах палка уходит вбок-вверх.
+      const prev = rows[Math.max(0, r - 1)] || row;
+      const next = rows[Math.min(N - 1, r + 1)] || row;
+      const pa = flip < 0 ? 1 - prev.b : prev.a;
+      const na = flip < 0 ? 1 - next.b : next.a;
+      const pb = flip < 0 ? 1 - prev.a : prev.b;
+      const nb = flip < 0 ? 1 - next.a : next.b;
+
+      const kUp = 1 - (r + 0.5) / N;      // 0 у ног, 1 у макушки
+      const raw = spec[idxOf(kUp)] / 255;
+
+      // Левый край: наружу — влево; правый: наружу — вправо.
+      const sides = [
+        { x: left + a * drawW, tx: (na - pa) * drawW, i: r },
+        { x: left + b * drawW, tx: (nb - pb) * drawW, i: N + r },
+      ];
+
+      for (let s = 0; s < 2; s++) {
+        const S  = sides[s];
+        const ty = 2 * rowH;
+        const L  = Math.hypot(S.tx, ty) || 1;
+        // Наружная нормаль: слева (-ty, tx), справа (ty, -tx).
+        let nx = (s === 0 ? -ty : ty) / L;
+        let ny = (s === 0 ? S.tx : -S.tx) / L;
+
+        // Потолок спадает за ~3 c, пол всплывает за ~4 c: окно АРУ длиннее
+        // такта, иначе она съедает сам удар, ради которого всё и затевалось.
+        pk[S.i] = Math.max(raw, pk[S.i] - dt * 0.33);
+        fl[S.i] = Math.min(raw, fl[S.i] + dt * 0.25);
+        const span = Math.max(0.06, pk[S.i] - fl[S.i]);
+        const target = Math.max(0, Math.min(1, (raw - fl[S.i]) / span));
+
+        const prevV = sm[S.i];
+        sm[S.i] = prevV + (target - prevV) * (target > prevV ? rise : fall);
+        const av = sm[S.i];
+        if (av < 0.04) continue;
+
+        /* Длина — чистая функция звука, без Math.sin(t): в тишине венец
+           втягивается в фигуру и его нет вовсе. */
+        const len = (0.02 + av * 0.26) * drawW * amt;
+        const x0 = S.x - nx * drawW * 0.012;   // основание чуть внутрь фигуры
+        const y0 = y   - ny * drawW * 0.012;
+        const x1 = x0 + nx * len;
+        const y1 = y0 + ny * len;
+
+        const g = ctx.createLinearGradient(x0, y0, x1, y1);
+        g.addColorStop(0,    _rgbaOf(color, 0.95 * amt));
+        g.addColorStop(0.55, _rgbaOf(color, 0.55 * amt));
+        g.addColorStop(1,    _rgbaOf(color, 0));
+        ctx.strokeStyle = g;
+        ctx.lineWidth = Math.max(1.5, rowH * (0.34 + av * 0.16));
+        ctx.beginPath();
+        ctx.moveTo(x0, y0);
+        ctx.lineTo(x1, y1);
+        ctx.stroke();
+      }
+    }
+
+    ctx.restore();
+  }
+
   function _drawOverlayItem(ctx, ov, cw, ch, bands, t, effectOverride = null, dt = 0.016) {
     // Если пользователь отключил аудио-реактивность для объекта — обнуляем bands.
     // Тогда движения (scroll_*, sway, drift, float, ...) идут с константной скоростью,
@@ -5292,6 +5751,21 @@ const BackgroundEngine = (() => {
       }
     }
 
+
+    /* Резонанс — последним: он ложится ПОД фигуру (destination-over), но
+       уже после tint/grade/feather, чтобы фактура сцены не проехалась по
+       кольцам. Включается ov.resonance > 0 (ставит AutoDirector). */
+    const resAmt = +ov.resonance || 0;
+    if (resAmt > 0.001 && ov.img && ov.img.naturalWidth) {
+      const _rdt = Math.min(Math.max(dt, 0.001), 0.05);
+      /* Венец рисуется ПЕРВЫМ, кольца — после: destination-over уводит
+         каждый следующий слой глубже, и удар-кольцо должно уходить ЗА
+         палки спектра, а не ложиться поверх них. */
+      _drawSpectrumCrown(ctx, ov, baseX + offX, baseY + offY, drawW, drawH,
+                         flip, bands, t, _rdt, resAmt);
+      _drawResonance(ctx, ov, baseX + offX, baseY + offY, drawW, drawH,
+                     flip, bands, t, _rdt, resAmt * 0.45);
+    }
     ctx.restore();
   }
 
@@ -6144,11 +6618,6 @@ const BackgroundEngine = (() => {
       tempCtx.filter = 'none';
       tempCtx.shadowBlur = 0;
       tempCtx.shadowColor = 'transparent';
-      /* Точку опоры зума берём ДО _ovRestore: там ov.x/ov.y ещё построчные
-         (из lineOverrides), а после — редакторские, и опора уехала бы. */
-      const _camFollow = ov.camFollow;
-      const _camPivotX = (ov.x / 100) * cw;
-      const _camPivotY = (ov.y / 100) * ch;
       _drawOverlayItem(tempCtx, ov, cw, ch, bands, t, effectiveEffect, dt);
       _ovRestore();
       tempCtx.restore();
@@ -6156,38 +6625,34 @@ const BackgroundEngine = (() => {
       ctx.save();
       ctx.globalAlpha = finalAlpha;
       ctx.globalCompositeOperation = 'source-over';
-      /* ── ЗУМ ОБЪЕКТА ЗАОДНО С ЗУМОМ ФОНА ──────────────────────
-         Фон живёт под камерой сцены, объекты — под ослабленной камерой
-         переднего плана. Из-за этого при наезде фон рос, а фигура почти
-         стояла: два плана переставали быть одной сценой.
+      /* ── ОБЪЕКТ ЕДЕТ С КАМЕРОЙ ПЕРЕДНЕГО ПЛАНА. ВСЁ. ──────────
+         Здесь стоял отдельный тракт: объект с ov.camFollow сбрасывался к
+         _fgCamBase (холст ДО камеры переднего плана) и получал вместо неё
+         свою — только зум сцены, целиком, вокруг собственного центра.
+         Замысел был «персонаж стоит В СЦЕНЕ, а не поверх неё», но тракт
+         разъезжался с кадром сразу в обе стороны:
 
-         Берём у сцены ТОЛЬКО ЗУМ и разворачиваем его вокруг точки самой
-         фигуры. Полную трансформацию применять нельзя, и это проверено
-         кадром: в ней есть ещё и перенос по фокусу относительно ЦЕНТРА
-         КАДРА, а фигура стоит у края (x ≈ 82%) — от такого переноса её
-         правый край уезжал за 110% ширины, то есть просто вываливался из
-         кадра. Своя опора даёт ровно то, что нужно: фигура растёт и
-         сжимается синхронно с фоном, оставаясь на своём месте в композиции. */
-      if (_camFollow != null && _fgCamBase) {
-        // Зум сцены (медленная кинематография) …
-        const sv = evaluateLineScene(bands, t);
-        const zScene = (sv && sv.blend > 0.001)
-          ? 1 + (sv.zoom - 1) * sv.blend * _camFollow : 1;
-        /* … и зум от БАСА, который фон получает в drawMedia в обход камеры
-           сцены. Без него фигура игнорировала именно то движение, которое
-           в кадре и читается — удар на бите. Оба множителя перемножаются:
-           это ровно то, что происходит с фоном. */
-        const zBass = 1 + (_bgBassZoom - 1) * _camFollow;
-        const z = zScene * zBass;
-        if (Math.abs(z - 1) > 0.001) {
-          // Свой save не нужен: мы уже внутри ctx.save() выше, и общий
-          // ctx.restore() вернёт трансформацию вместе с alpha.
-          ctx.setTransform(_fgCamBase);
-          ctx.translate(_camPivotX, _camPivotY);
-          ctx.scale(z, z);
-          ctx.translate(-_camPivotX, -_camPivotY);
-        }
-      }
+         • зум брался ПОЛНЫЙ (camFollow = 1.0), а сцена на наезде уходит в
+           полтора-два раза. Вырезанный PNG рос вокруг своего центра во все
+           стороны: вбок вываливался за рамку и обрезался прямой вертикалью,
+           вверх уносил голову. Это и читалось как «спрайт улетел»;
+         • поворота и переноса не бралось ВООБЩЕ: сброс к _fgCamBase — это
+           возврат на неподвижную плоскость. На dutchTilt, handheld,
+           whipPan, dropDown фон наклонялся и ехал целиком, набор ехал на
+           свои 0.28, а фигура не двигалась ни на сколько — три плана
+           вместо одного кадра.
+
+         Отдельного тракта больше нет. Объект остаётся в той трансформации,
+         которую холст уже несёт, — в общей камере переднего плана
+         (FOREGROUND_CAM в App.js). Это ровно то, что применено к набору,
+         поэтому фигура и текст не могут разойтись между собой по
+         построению, а не по подобранным коэффициентам. Наезд у фигуры
+         выходит слабее фонового — так и должно быть: передний план в
+         наезде движется медленнее заднего.
+
+         ov.camFollow ни на что не влияет; поле оставлено, чтобы не ломать
+         сохранённые проекты. */
+
       ctx.drawImage(tempCanvas, 0, 0);
       ctx.restore();
     }
@@ -7823,6 +8288,7 @@ const BackgroundEngine = (() => {
     _previewDrawCard: (ctx, ov, cw, ch, bands, t) => _drawCardComposition(ctx, ov, cw, ch, bands, t),
     get effectTypes() { return EFFECT_TYPES; },
     get FrameDrawEngine() { return FrameDrawEngine; },
+    setSpectrum,
     measureTextOverlay, setOverlayChangeCallback,
     getTextSafeArea, setTextSafeInset, getTextSafeInset,
     getCharacterShape,

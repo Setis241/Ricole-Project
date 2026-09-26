@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <title>Ricole Project — Кинетическая типографика</title>
-<link rel="stylesheet" href="css/main.css?v=20260731m" />
+<link rel="stylesheet" href="css/main.css?v=20260914e" />
 </head>
 <body>
 
@@ -128,7 +128,11 @@
             <button class="btn btn-ghost" id="lrcLoadBtn">📄 Файл</button>
             <button class="btn btn-ghost" id="lrcClearFileBtn">✕</button>
           </div>
-          <textarea id="lyricsInput" rows="4" placeholder="[00:01.00] Первая строка&#10;[00:03.50] Вторая строка"></textarea>
+          <!-- Поле остаётся источником правды для всех модулей, но с глаз
+               убрано: читать в нём разметку невозможно. Правка идёт через
+               полноэкранный редактор (LyricsEditor.js). -->
+          <textarea id="lyricsInput" rows="4" placeholder="[00:01.00] Первая строка&#10;[00:03.50] Вторая строка" style="display:none;"></textarea>
+          <button class="btn btn-primary btn-full" id="lyricsEditorBtn">📝 РЕДАКТОР ТЕКСТА</button>
           <div class="btn-group" style="margin-top:8px;">
             <button class="btn btn-ghost" id="parseLyricsBtn">Загрузить</button>
             <button class="btn btn-ghost" id="clearLyricsBtn">Очистить</button>
@@ -390,22 +394,23 @@
 
 </div>
 
-<script src="AudioStorage.js?v=20260731m"></script>
-<script src="LRCParser.js?v=20260731m"></script>
-<script src="AudioEngine.js?v=20260731m"></script>
-<script src="physics-and-anim.js?v=20260731m"></script>
-<script src="BackgroundEngine.js?v=20260731m"></script>
-<script src="BackgroundManagerStorage.js?v=20260731m"></script>
-<script src="BackgroundManager.js?v=20260731m"></script>
-<script src="renderers.js?v=20260731m"></script>
-<script src="BoxStyles.js?v=20260731m"></script>
-<script src="FxEditor.js?v=20260731m"></script>
-<script src="webm-muxer.js?v=20260731m"></script>
-<script src="ExportEngine.js?v=20260731m"></script>
-<script src="PresetManager.js?v=20260731m"></script>
-<script src="FactoryPresets.js?v=20260731m"></script>
-<script src="AutoDirector.js?v=20260731m"></script>
-<script src="App.js?v=20260731m"></script>
+<script src="AudioStorage.js?v=20260914e"></script>
+<script src="LRCParser.js?v=20260914e"></script>
+<script src="AudioEngine.js?v=20260914e"></script>
+<script src="physics-and-anim.js?v=20260914e"></script>
+<script src="BackgroundEngine.js?v=20260914e"></script>
+<script src="BackgroundManagerStorage.js?v=20260914e"></script>
+<script src="BackgroundManager.js?v=20260914e"></script>
+<script src="renderers.js?v=20260914e"></script>
+<script src="BoxStyles.js?v=20260914e"></script>
+<script src="FxEditor.js?v=20260914e"></script>
+<script src="webm-muxer.js?v=20260914e"></script>
+<script src="ExportEngine.js?v=20260914e"></script>
+<script src="PresetManager.js?v=20260914e"></script>
+<script src="FactoryPresets.js?v=20260914e"></script>
+<script src="AutoDirector.js?v=20260914e"></script>
+<script src="LyricsEditor.js?v=20260914e"></script>
+<script src="App.js?v=20260914e"></script>
 <script>
   /* Версия берётся из ?v= самого тега, а не пишется руками: захардкоженная
      строка врала при каждом бампе и заставляла искать кэш там, где его нет. */

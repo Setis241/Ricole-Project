@@ -95,9 +95,81 @@ const App = (() => {
     canvas.style.height = `${Math.round(h * s)}px`;
   }
 
+  /* Состояние фона/камеры для строки idx: команды разметки + кам-сцена.
+     Вызывается и на смене строки при проигрывании, и для idle-превью
+     (до Play на холсте должен стоять кадр первой строки, а не глобальный фон). */
+  function applyLineState(idx) {
+    const lyric = lyrics[idx];
+    if (!lyric) return;
+
+    if (lyric.bgCommands) {
+      lyric.bgCommands.forEach(cmd => {
+        BackgroundEngine.applyBackgroundCommand(cmd);
+        if (BackgroundManager.hasEntries) BackgroundManager.applyFxCommand(cmd);
+      });
+    }
+
+    // Активируем кам-сцену из коллекции (если строка приписана к одной).
+    // Анимация играется один раз на весь contiguous-блок строк, привязанных
+    // к ТОЙ ЖЕ сцене (а не перезапускается на каждой строке).
+    const _sceneAssign = (BackgroundEngine.findCamSceneForLine
+      ? BackgroundEngine.findCamSceneForLine(idx) : null);
+    if (_sceneAssign) {
+      let _runStart = idx, _runEnd = idx;
+      while (_runStart > 0 &&
+             BackgroundEngine.findCamSceneForLine(_runStart - 1) === _sceneAssign) _runStart--;
+      while (_runEnd < lyrics.length - 1 &&
+             BackgroundEngine.findCamSceneForLine(_runEnd + 1) === _sceneAssign) _runEnd++;
+      const _blockStart = lyrics[_runStart].time;
+      const _blockEnd   = (_runEnd + 1 < lyrics.length)
+        ? lyrics[_runEnd + 1].time
+        : lyrics[_runEnd].time + 4;
+      BackgroundEngine.setLineCamScene(_sceneAssign, _blockStart, _blockEnd - _blockStart, {
+        currentLineIdx: idx,
+        blockStartLine: _runStart,
+        blockEndLine:   _runEnd,
+      });
+    } else if (BackgroundEngine.clearLineCamScene) {
+      BackgroundEngine.clearLineCamScene();
+    }
+  }
+
+  /* Idle-превью: пока не играем, фон резолвится по этой строке, а не по -1
+     (на -1 BackgroundManager падает на последний global-entry). */
+  function previewFirstLine() {
+    if (!lyrics.length) return;
+    BackgroundEngine.resetCamera();
+    if (typeof BackgroundManager !== 'undefined') BackgroundManager.resetFxOverrides();
+    applyLineState(0);
+  }
+
   /* ── RENDER LOOP ──────────────────────────── */
   function render(now) {
     rafId = requestAnimationFrame(render);
+
+    /* ── КАДР ВСЕГДА НАЧИНАЕТСЯ С ЧИСТОГО ЛИСТА ──────────────
+       Кадр состоит из вложенных ctx.save()/restore(): сценический
+       трансформ камеры, затемнение концовки, каждый оверлей. Стоит любому
+       звену бросить исключение — а хватает одной нечисловой координаты в
+       градиенте, — и часть restore() не выполняется. Дальше начинается
+       самое неприятное: незакрытый трансформ остаётся в контексте НАВСЕГДА,
+       каждый следующий кадр множит его на себя, и уже через секунду и фон,
+       и заливка-очистка холста рисуются далеко за его пределами. Холст
+       перестаёт чиститься вообще, и в нём остаётся мусор композитора —
+       куски чужих окон.
+       Поэтому в начале каждого кадра трансформ и стек приводятся в
+       исходное состояние принудительно. Это стоит одну строку и делает
+       невозможным целый класс аварий: любой сбой в кадре остаётся в этом
+       кадре и не отравляет следующие. */
+    /* Именно сброс состояния, а не ctx.reset(): полный reset стирает и
+       то, что выставлено один раз при старте (шрифтовые умолчания,
+       сглаживание), а нам нужно снять ровно последствия аварии. */
+    if (ctx) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.filter = 'none';
+    }
 
     const dt = Math.min((now - lastT) / 1000, 0.05);
     lastT    = now;
@@ -109,6 +181,9 @@ const App = (() => {
     // ── Audio analysis
     const freqData = AudioEngine.getFrequencyData();
     const bands    = FrequencyBands.analyze(freqData, AudioEngine.sampleRate, AudioEngine.fftSize, dt);
+    // Спектр нужен движку целиком: из него строится венец полос по контуру
+    // фигуры (см. _drawSpectrumCrown). bands — четыре числа, венцу их мало.
+    if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 
     const t = AudioEngine.getCurrentTime();
 
@@ -126,38 +201,7 @@ const App = (() => {
         springs.offsetX.reset(0);
         highlightLyricList(activeIdx);
 
-        // Применяем команды фона
-        if (lyrics[activeIdx] && lyrics[activeIdx].bgCommands) {
-          lyrics[activeIdx].bgCommands.forEach(cmd => {
-            BackgroundEngine.applyBackgroundCommand(cmd);
-            if (BackgroundManager.hasEntries) BackgroundManager.applyFxCommand(cmd);
-          });
-        }
-
-        // Активируем кам-сцену из коллекции (если строка приписана к одной).
-        // Анимация играется один раз на весь contiguous-блок строк, привязанных
-        // к ТОЙ ЖЕ сцене (а не перезапускается на каждой строке).
-        const _curLyric = lyrics[activeIdx];
-        const _sceneAssign = (BackgroundEngine.findCamSceneForLine
-          ? BackgroundEngine.findCamSceneForLine(activeIdx) : null);
-        if (_curLyric && _sceneAssign) {
-          let _runStart = activeIdx, _runEnd = activeIdx;
-          while (_runStart > 0 &&
-                 BackgroundEngine.findCamSceneForLine(_runStart - 1) === _sceneAssign) _runStart--;
-          while (_runEnd < lyrics.length - 1 &&
-                 BackgroundEngine.findCamSceneForLine(_runEnd + 1) === _sceneAssign) _runEnd++;
-          const _blockStart = lyrics[_runStart].time;
-          const _blockEnd   = (_runEnd + 1 < lyrics.length)
-            ? lyrics[_runEnd + 1].time
-            : lyrics[_runEnd].time + 4;
-          BackgroundEngine.setLineCamScene(_sceneAssign, _blockStart, _blockEnd - _blockStart, {
-            currentLineIdx: activeIdx,
-            blockStartLine: _runStart,
-            blockEndLine:   _runEnd,
-          });
-        } else if (BackgroundEngine.clearLineCamScene) {
-          BackgroundEngine.clearLineCamScene();
-        }
+        applyLineState(activeIdx);
       }
     }
 
@@ -278,6 +322,11 @@ const App = (() => {
       _animResult = modeFn({
         bands, t, params, springs,
         words,
+        /* Пословные тайминги строки, если они размечены во втором проходе
+           тайминг-редактора: [{t, text}] в АБСОЛЮТНОМ времени трека.
+           Строка без разметки отдаёт null — режим обязан работать и так,
+           раскладывая слова сам. */
+        wordTimes: _lyric.wordTimes || null,
         canvasW:  cw,
         canvasH:  ch,
         elapsed:  _elapsed,
@@ -350,7 +399,7 @@ const App = (() => {
 
     if (BackgroundManager.hasEntries) {
       // Менеджер фонов: тикаем + рисуем активный entry с per-bg настройками
-      BackgroundManager.tick(activeIdx, dt);
+      BackgroundManager.tick(activeIdx >= 0 ? activeIdx : (lyrics.length ? 0 : -1), dt);
       BackgroundManager.draw(ctx, cw, ch, bands, t, dt);
       // Оверлеи затемнения/осветления из FX Editor работают поверх BackgroundManager
       BackgroundEngine.drawFxOverlay(ctx, cw, ch, dt);
@@ -367,6 +416,10 @@ const App = (() => {
     if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
     if (_sceneApplied) ctx.restore();
+
+    // Фон живёт в том же дуотоне, что и строка. После restore — заливка
+    // кроется по кадру, а не едет и не масштабируется вместе с фоном.
+    TextRenderer.drawColorWash(ctx, cw, ch, _effectiveColor);
 
     // Flash-overlay сцены (вспышки/затемнения по басу) — поверх фона, но
     // перед текстом, чтобы лирика не моргала.
@@ -428,14 +481,13 @@ const App = (() => {
         if (params.showTranslation && _lyric.translation) {
           const trSize = Math.max(14, Math.round(_effectiveSize * params.translationRatio));
           const trY    = (mainBottom ?? textY + _effectiveSize) + trSize * 0.9;
-          const trAnim = { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, rotation: 0, alpha: 1 };
           // Перевод следует за основным текстом по X (та же горизонтальная позиция)
-          TextRenderer.draw(
-            ctx, { text: _lyric.translation },
+          TextRenderer.drawTranslation(
+            ctx, _lyric.translation,
             textX, trY,
-            trAnim, _fadeA,
-            params.translationColor, _effectiveFont, trSize, cw, t,
-            null, safe, _shapeAt
+            _fadeA,
+            params.translationColor, _effectiveFont, trSize, cw,
+            safe, _shapeAt
           );
         }
       }
@@ -511,6 +563,7 @@ const App = (() => {
       if (end) BackgroundEngine.setEndingMarker(end.time);
       else     BackgroundEngine.clearEndingMarker();
     }
+    if (!AudioEngine.isPlaying) previewFirstLine();
   }
 
   function renderLyricList() {
@@ -698,6 +751,11 @@ const App = (() => {
     const lyricsInput = document.getElementById('lyricsInput');
 
     function insertCommand(cmd) {
+      /* Само поле теперь скрыто, и каретки в нём нет: вставка «по курсору»
+         молча уехала бы в начало текста. Пока открыт полноэкранный
+         редактор, вставляем в НЕГО — там курсор и есть у пользователя. */
+      if (window.LyricsEditor && window.LyricsEditor.insert &&
+          window.LyricsEditor.insert(cmd)) return;
       const start = lyricsInput.selectionStart;
       const end   = lyricsInput.selectionEnd;
       const text  = lyricsInput.value;
@@ -783,6 +841,7 @@ const App = (() => {
       BackgroundEngine.resetCamera();  // Сбрасываем все эффекты и камеру
       if (Recorder.isRecording) Recorder.stop();
       activeIdx = -1;
+      previewFirstLine();
       setStatus('idle', 'Stopped');
       setStatusDot('');
     });

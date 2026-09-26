@@ -39,6 +39,17 @@ const TextRenderer = (() => {
     if (m) return [0,2,4].map(i => parseInt(m[1].substr(i,2), 16));
     m = s.match(/^rgba?\(\s*([\d.]+)[\s,]+([\d.]+)[\s,]+([\d.]+)/i);
     if (m) return [+m[1], +m[2], +m[3]];
+    /* hsl() разбираем тоже: её возвращает _hueRotate, а значит и _deepShade.
+       Без этого любой _shift() поверх глубины молча ничего не делал
+       и терял альфу — то есть нижние стопы дуотона были не тем, чем написаны. */
+    m = s.match(/^hsla?\(\s*([\d.]+)[\s,]+([\d.]+)%[\s,]+([\d.]+)%/i);
+    if (m) {
+      const h = ((+m[1]) % 360 + 360) % 360, sat = +m[2] / 100, l = +m[3] / 100;
+      const c = (1 - Math.abs(2*l - 1)) * sat, x = c * (1 - Math.abs((h/60) % 2 - 1));
+      const mm = l - c/2;
+      const seg = [[c,x,0],[x,c,0],[0,c,x],[0,x,c],[x,0,c],[c,0,x]][Math.floor(h/60) % 6];
+      return seg.map(v => Math.round((v + mm) * 255));
+    }
     return null;
   }
   // k > 0 — к белому, k < 0 — к чёрному. Возвращает css-цвет.
@@ -164,6 +175,8 @@ const TextRenderer = (() => {
   let _kFitSoft = 1, _kFitKey = '';
 
   function fillGradient(ctx, x, cy, tw, size, color) {
+    // См. sheenGradient: NaN здесь обрывает кадр целиком.
+    if (!isFinite(cy) || !isFinite(size)) return color;
     if (!_rgb(color)) return color;
     const g = ctx.createLinearGradient(0, cy - size*0.62, 0, cy + size*0.46);
     const deep = _deepShade(color);
@@ -180,6 +193,8 @@ const TextRenderer = (() => {
 
   /* ── {GRAD}: дуотон во всю высоту, чистый цвет → цветная глубина ── */
   function duotoneGradient(ctx, x, cy, tw, size, color) {
+    // См. sheenGradient: NaN здесь обрывает кадр целиком.
+    if (!isFinite(cy) || !isFinite(size)) return color;
     if (!_rgb(color)) return color;
     const g = ctx.createLinearGradient(0, cy - size*0.66, 0, cy + size*0.48);
     const deep = _deepShade(color);
@@ -189,6 +204,30 @@ const TextRenderer = (() => {
     g.addColorStop(0.78, _shift(deep,   0.18));
     g.addColorStop(1,    _shift(deep,  -0.12));
     return g;
+  }
+
+  /* ── Дуотон на весь кадр ──
+     Текст шёл дуотоном, а фон оставался сырой картинкой — два
+     несвязанных слоя в одном кадре. Здесь тот же переход, что у буквы:
+     свет цвета строки сверху, та же цветная глубина снизу, но полупрозрачно:
+     картинка обязана читаться, заливка — нет. */
+  function drawColorWash(ctx, cw, ch, color, strength) {
+    const k = strength === undefined ? 1 : strength;
+    if (!_rgb(color) || k <= 0.001) return;
+    /* Тот же переход, что у буквы: свет цвета строки сверху, цветная
+       глубина снизу. Альфа держится ниже половины: тонировка обязана читаться
+       как цвет кадра, а не как шторка поверх картинки. */
+    const deep = _deepShade(color);
+    const g = ctx.createLinearGradient(0, 0, 0, ch);
+    g.addColorStop(0,    _shift(color,  0.30, 0.26 * k));
+    g.addColorStop(0.38, _shift(color,  0.00, 0.13 * k));
+    g.addColorStop(0.70, _shift(deep,   0.10, 0.26 * k));
+    g.addColorStop(1,    _shift(deep,  -0.15, 0.44 * k));
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.restore();
   }
 
   /* ── Фактура ──
@@ -278,6 +317,12 @@ const TextRenderer = (() => {
      Полоса едет по слову; фаза завязана на x, чтобы соседние слова строки
      не вспыхивали синхронно и строка не мигала одним куском. */
   function sheenGradient(ctx, x, cy, tw, size, t, strength) {
+    /* Страховка от нечисловой геометрии. createLinearGradient на NaN
+       бросает исключение, а исключение здесь — это оборванный кадр: не
+       выполняются ни ctx.restore() сценического трансформа, ни очистка
+       холста следующим кадром. Один кривой замер строки гасит всю
+       картинку. Кадр важнее блика: не смогли посчитать — блика нет. */
+    if (!isFinite(x) || !isFinite(cy) || !isFinite(tw) || !isFinite(size)) return null;
     const half = Math.max(tw, size) * 0.5;
     const g = ctx.createLinearGradient(x - half, cy + size*0.4, x + half, cy - size*0.5);
     const p = (Math.sin(t*1.15 + x*0.0035) * 0.5 + 0.5) * 0.76 + 0.12;
@@ -932,9 +977,93 @@ const TextRenderer = (() => {
     ctx.restore();
   }
 
+  /* ── Режим перевода ──
+     Перевод — второй текст в кадре, а не второй эффект. Дуотон, блик, грейн,
+     свечение и боксы делали из подписи самостоятельный набор: на припеве
+     кегль перевода перескакивал порог plainFill (38px) и подпись внезапно
+     начинала жить своей жизнью, споря с основной строкой. Здесь набор
+     принудительно ровный при любом кегле и любой разметке. */
+  let _plainRun = false;
+
+  /* Перевод рисуется отдельно, а не основным draw(). У основного вся
+     раскладка заточена под анимируемую строку: ширина делится на резерв
+     scaleX (2.2), межстрочный — 1.6 кегля, зона режется маской силуэта.
+     Для подписи это давало ровно то, что было видно на кадре — два слова
+     разорваны на две строки с провалом в полтора кегля и сдвигом вбок.
+     Здесь: подпись не анимируется, значит резерв не нужен; максимум две
+     строки, интерлиньяж 1.2, шрифт ужимается, чтобы уложиться. */
+  function drawTranslation(ctx, text, cx, cy, fadeAlpha, color, font, fontSize, canvasWidth, bounds, shapeAt) {
+    if (!text || !String(text).trim() || fadeAlpha <= 0.001) return;
+    const raw = String(text).replace(/\s+/g, ' ').trim();
+
+    const areaFull = clipToVisible(resolveArea(bounds, canvasWidth), ctx);
+    const area = maskedArea(areaFull, shapeAt, cy, fontSize * 1.2);
+    const maxWidth = Math.max(40, area.w - area.w * 0.04 * 2);
+
+    const words = raw.split(' ');
+    let size = fontSize, rows = null;
+    const MIN = Math.max(11, fontSize * 0.6);
+    for (;;) {
+      ctx.font = `${size}px ${font}${EMOJI_FB}`;
+      // Одна строка — норма. Две — предел, дальше ужимаем кегль.
+      if (ctx.measureText(raw).width <= maxWidth) { rows = [raw]; break; }
+      const out = []; let line = '';
+      for (const w of words) {
+        const probe = line ? line + ' ' + w : w;
+        if (line && ctx.measureText(probe).width > maxWidth) { out.push(line); line = w; }
+        else line = probe;
+      }
+      if (line) out.push(line);
+      if (out.length <= 2 || size <= MIN) { rows = out.slice(0, 2); break; }
+      size = Math.max(MIN, size * 0.9);
+    }
+
+    const lineH = size * 1.2;
+    // Центр держим у основного текста, но не даём выехать за зону.
+    const halfMax = Math.max(...rows.map(r => ctx.measureText(r).width)) / 2;
+    const minX = area.x + halfMax + area.w * 0.02;
+    const maxX = area.x + area.w - halfMax - area.w * 0.02;
+    const x = minX <= maxX ? Math.min(Math.max(cx, minX), maxX) : (area.x + area.w / 2);
+
+    ctx.save();
+    ctx.globalAlpha = fadeAlpha;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'transparent';
+    ctx.shadowBlur = 0;
+    rows.forEach((row, i) => {
+      const y = cy + i * lineH;
+      // Ореол вместо обводки: контур шрифта не утолщается, контраст
+      // набирается за границей глифа — как у основного набора.
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.75)';
+      ctx.shadowBlur = Math.max(3, size * 0.22);
+      ctx.shadowOffsetY = size * 0.05;
+      ctx.fillStyle = 'rgba(0,0,0,0.85)';
+      ctx.globalAlpha = fadeAlpha * 0.6;
+      ctx.fillText(row, x, y);
+      ctx.restore();
+      ctx.fillStyle = color;
+      ctx.fillText(row, x, y);
+    });
+    ctx.restore();
+  }
+
+  function drawPlain(...args) {
+    _plainRun = true;
+    try { return draw(...args); }
+    finally { _plainRun = false; }
+  }
+
   /* ── Draw a single span ── */
   function drawSpan(ctx, span, x, y, baseFontSize, font, t, anim) {
     if (!span.word || span.word.trim()==='') return;
+    if (_plainRun) {
+      // Разметка внутри перевода не должна включать декорации: остаётся
+      // только начертание (bold/italic) и сам текст.
+      span = { word: span.word, color: span.color, _w: span._w,
+               bold: span.bold, italic: span.italic };
+    }
     ctx.save();
 
     const size = span.big ? baseFontSize*1.45 : span.small ? baseFontSize*0.65 : baseFontSize;
@@ -964,7 +1093,7 @@ const TextRenderer = (() => {
        — Мелкий кегль: перепад светлоты на высоте 20-30px съедает половину
          штриха, и подпись становится нечитаемой. Порог 38px — ниже него
          градиент физически некуда положить. */
-    const plainFill = !!span._ghost || size < 38;
+    const plainFill = _plainRun || !!span._ghost || size < 38;
 
     const finalX = x+dx, finalY = y+dy;
     const metrics = ctx.measureText(span.word);
@@ -1126,6 +1255,14 @@ const TextRenderer = (() => {
     const ghostFontSize = fontSize;
     const ghostCx = cx, ghostCy = cy;
 
+    /* Линейки титра (anim.rules) стоят в тех же координатах, что и слова,
+       значит и ужимаются вместе с ними. Иначе вписывание сдвигает набор, а
+       линейки остаются на прежнем месте — и слово выходит уже не из-за
+       своей линейки, а из пустоты рядом с ней. */
+    const _scaleRules = (rules, k) => Array.isArray(rules)
+      ? rules.map(r => ({ ...r, x0: r.x0 * k, x1: r.x1 * k, y: r.y * k }))
+      : rules;
+
     // ── Вписываем word-layout в безопасную зону кадра ───────────────────
     // Считаем bbox финальных позиций слов; если он шире/выше зоны —
     // сжимаем раскладку (позиции + кегль) и сдвигаем центр внутрь кадра.
@@ -1156,6 +1293,23 @@ const TextRenderer = (() => {
            это не смена строки, это вписывание, отработавшее по словам,
            которых ещё нет на месте. Фоновый слой центр двигает вместе с
            набором, поэтому заметнее всего было именно на нём. */
+        /* Попытка учитывать ещё не проявившиеся слова откачена: габарит
+           на первых кадрах строки становился заметно больше, цикл ужатия
+           (он меряет каждое слово заново на каждой итерации) прогонялся
+           лишние разы, и на появлении строки шёл провал по кадрам. Мелкая
+           подстройка блока на полпути неприятна, фриз на каждой строке —
+           хуже. */
+        /* Нечисловая координата в замер не идёт ни при каких условиях.
+           Одна NaN-позиция отравляет весь габарит: из него считается
+           вписывание, из вписывания — кегль и точка строки, а дальше
+           NaN уходит в createLinearGradient, тот бросает исключение, и
+           КАДР ОБРЫВАЕТСЯ на середине — вместе с ctx.restore() сценического
+           трансформа. Стек трансформов растёт каждый кадр, фон начинает
+           рисоваться мимо холста, холст перестаёт чиститься, и в нём
+           остаётся мусор композитора (куски чужих окон). Один пропущенный
+           isFinite стоит всей картинки, поэтому проверка стоит первой. */
+        if (!isFinite(wData.x ?? 0) || !isFinite(wData.y ?? 0) ||
+            !isFinite(wData.scale ?? 1)) continue;
         if (settledOnly && (wData.alpha ?? 1) < 0.55) continue;
         /* Фоновый слой (ghost) в замер НЕ входит — и это не мелочь.
            Стена повторов и подложка выходят за кадр НАМЕРЕННО: они кроют
@@ -1171,8 +1325,20 @@ const TextRenderer = (() => {
         ctx.font = `${wFs}px ${font}${EMOJI_FB}`;
         const hw = ctx.measureText(wData.word).width / 2;
         const hh = wFs * 0.6;
+        let top = (wData.y ?? 0) - hh, bot = (wData.y ?? 0) + hh;
+        /* Слово под маской-щелью (clipEm) меряется по ВИДИМОЙ части.
+           Титр выводит слово из-за линейки: пока оно едет, его настоящее
+           место ниже щели, то есть в кадре его ещё нет. Мерить его целиком
+           значит на первом же кадре увидеть «набор вылез вниз» и ужать
+           весь титр — а латч ниже это ужатие уже не отпустит до конца
+           строки. */
+        if (Array.isArray(wData.clipEm)) {
+          top = Math.max(top, (wData.y ?? 0) + wData.clipEm[0] * wFs);
+          bot = Math.min(bot, (wData.y ?? 0) + wData.clipEm[1] * wFs);
+          if (!(bot > top)) continue;
+        }
         minX = Math.min(minX, (wData.x ?? 0) - hw); maxX = Math.max(maxX, (wData.x ?? 0) + hw);
-        minY = Math.min(minY, (wData.y ?? 0) - hh); maxY = Math.max(maxY, (wData.y ?? 0) + hh);
+        minY = Math.min(minY, top); maxY = Math.max(maxY, bot);
       }
       return { minX, maxX, minY, maxY };
     }
@@ -1218,7 +1384,8 @@ const TextRenderer = (() => {
           fontSize *= Math.max(0.45, kFit);
           // Позиции фона не жмём: они посчитаны от кадра, а не от разлёта
           // слов, и сжатие оставило бы по краям голую полосу.
-          anim = { ...anim, words: anim.words.map(w => w.ghost ? w : ({
+          anim = { ...anim, rules: _scaleRules(anim.rules, kFit),
+            words: anim.words.map(w => w.ghost ? w : ({
             ...w, x: (w.x ?? 0) * kFit, y: (w.y ?? 0) * kFit,
           })) };
           bb = wlBBox(anim.words, fontSize);
@@ -1230,7 +1397,8 @@ const TextRenderer = (() => {
             const ky = availH / ((bb.maxY - bb.minY) || 1);
             const k2 = Math.min(1, kx, ky);
             if (k2 >= 0.999) break;
-            anim = { ...anim, words: anim.words.map(w => w.ghost ? w : ({
+            anim = { ...anim, rules: _scaleRules(anim.rules, k2),
+              words: anim.words.map(w => w.ghost ? w : ({
               ...w, x: (w.x ?? 0) * k2, y: (w.y ?? 0) * k2,
             })) };
             bb = wlBBox(anim.words, fontSize);
@@ -1432,6 +1600,152 @@ const TextRenderer = (() => {
        Именно это позволяет ставить подложку ПЕРЕД текстом в массиве, то
        есть рисовать её ПОД ним: раньше служебные элементы приходилось
        дописывать в хвост и они ложились поверх набора. */
+    /* ── ПЛАШКА-ПОЛОСА ─────────────────────────────────────
+       Механизм для режима, который кладёт за строкой собственную фактуру во
+       весь кадр: набор на ней теряется, буквы читаются как ещё один повтор
+       среди своих же дублей. Рамка из BoxStyles тут не спасает: она обводит
+       СЛОВО, а на пословной раскладке движок либо растягивает одну рамку на
+       весь разлёт, либо рисует по рамке на каждое слово.
+
+       СЕЙЧАС ПЛАШКУ НЕ ПРОСИТ НИКТО. Единственными её заказчиками были
+       backdrop и echo, и сняты они в том числе из-за неё: чёрная полоса
+       поперёк кадра — это не решение проблемы «набор теряется в фактуре», а
+       вторая проблема сверху. Код оставлен рабочим на случай режима, где
+       полоса будет замыслом, а не заплаткой.
+
+       Полоса — не рамка вокруг слова, а горизонталь во всю ширину кадра
+       под всей строкой: она разрезает фактуру и даёт набору на чём стоять.
+       Режим просит её флагом plate; геометрия считается ЗДЕСЬ, потому что
+       только здесь известны и кадр, и кегль, и ужатие _fit.
+
+       Рисуется в проходе 'main': выше фона-дубля, ниже текста. */
+    if (anim.plate && (pass === null || pass === 'main')) {
+      let top = Infinity, bot = -Infinity;
+      for (const wD of anim.words) {
+        if (wD.ghost || !wD.word || !wD.word.trim()) continue;
+        if ((wD.alpha ?? 1) < 0.2) continue;
+        const fs = fontSize * (wD.scale ?? 1) * _fit;
+        const y  = cy + (wD.y ?? 0) * _fit;
+        if (y - fs * 0.78 < top) top = y - fs * 0.78;
+        if (y + fs * 0.34 > bot) bot = y + fs * 0.34;
+      }
+      if (top < bot) {
+        const pad = fontSize * 0.30 * _fit;
+        const y0 = top - pad, h = (bot + pad) - (top - pad);
+        const o = (typeof anim.plate === 'object' && anim.plate) || {};
+
+        /* ── Вырез под фигуру ──
+           Полоса идёт во всю ширину кадра и потому неизбежно доходит до
+           персонажа. Ложась на него, она читается как плашка, наклеенная
+           поверх героя, — то есть ровно тем, чем полоса быть не должна:
+           она слой КАДРА, а фигура стоит в кадре ближе неё.
+
+           Силуэт снимается тем же shapeAt, что и зона набора, несколькими
+           пробами по высоте полосы (у фигуры на разной высоте разная
+           ширина, и одна проба промахивается на плечо). Полоса рисуется
+           двумя кусками — слева и справа от силуэта, — и каждый гаснет
+           в сторону фигуры градиентом: резкий обрез читался бы вторым
+           контуром вокруг героя. */
+        let sx0 = Infinity, sx1 = -Infinity;
+        if (typeof shapeAt === 'function') {
+          const N = 9;
+          for (let i = 0; i < N; i++) {
+            const sp = shapeAt(y0 + h * (i / (N - 1)));
+            if (!sp) continue;
+            sx0 = Math.min(sx0, sp.x0); sx1 = Math.max(sx1, sp.x1);
+          }
+        }
+        const fill = o.fill || 'rgba(8,8,10,0.78)';
+        const line = o.line || 'rgba(255,255,255,0.10)';
+        const th   = Math.max(1, fontSize * 0.02);
+        /* Растушёвка меряется КАДРОМ, а не кеглем: при мелком наборе
+           ramp в полкегля — это 30 px на 1920, то есть на глаз тот же
+           резкий обрез, ради ухода от которого полоса и режется. */
+        const feather = Math.max(canvasWidth * 0.10, fontSize * 1.2);
+
+        ctx.save();
+        const _piece = function (x, w, fadeSide) {
+          if (w <= 1) return;
+          if (fadeSide === 0) {
+            ctx.fillStyle = fill;
+            ctx.fillRect(x, y0, w, h);
+            ctx.fillStyle = line;
+            ctx.fillRect(x, y0, w, th);
+            ctx.fillRect(x, y0 + h - th, w, th);
+            return;
+          }
+          // Градиент гаснет к стороне, где стоит фигура.
+          /* Растушёвка не должна съедать кусок целиком: иначе короткий
+             обрубок вырождается в ту же вертикальную обрезку. */
+          const f  = Math.min(feather, w * 0.6);
+          const gx = fadeSide > 0 ? x + w : x;         // край у фигуры
+          [[fill, 'fill'], [line, 'line']].forEach(function (pair) {
+            const grad = ctx.createLinearGradient(gx - fadeSide * f, 0, gx, 0);
+            grad.addColorStop(0, pair[0]);
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            if (pair[1] === 'fill') {
+              ctx.fillStyle = fill;
+              // Ровная часть — до начала растушёвки.
+              const solidW = w - f;
+              if (solidW > 0) ctx.fillRect(fadeSide > 0 ? x : x + f, y0, solidW, h);
+              ctx.fillStyle = grad;
+              ctx.fillRect(gx - fadeSide * f, y0, f, h);
+            } else {
+              ctx.fillStyle = line;
+              const solidW = w - f;
+              if (solidW > 0) {
+                const lx = fadeSide > 0 ? x : x + f;
+                ctx.fillRect(lx, y0, solidW, th);
+                ctx.fillRect(lx, y0 + h - th, solidW, th);
+              }
+              ctx.fillStyle = grad;
+              ctx.fillRect(gx - fadeSide * f, y0, f, th);
+              ctx.fillRect(gx - fadeSide * f, y0 + h - th, f, th);
+            }
+          });
+        };
+
+        if (sx0 < Infinity && sx1 > 0 && sx1 > sx0) {
+          _piece(0, Math.max(0, sx0), +1);                                  // слева от фигуры
+          _piece(Math.min(canvasWidth, sx1), Math.max(0, canvasWidth - sx1), -1); // справа
+        } else {
+          _piece(0, canvasWidth, 0);
+        }
+        ctx.restore();
+      }
+    }
+
+    /* ── ЛИНЕЙКИ ТИТРА ─────────────────────────────────────
+       Титр (режим title) стоит на волосяных линейках: подпись встаёт В
+       линейку, слово-герой выходит из-за неё. Это часть набора, а не рамка
+       вокруг него, поэтому линейки задаются в координатах строки и проходят
+       ту же страховку кадра (_fit), что и слова: иначе текст ужмётся, а
+       линейки останутся прежней длины и разойдутся с ним.
+
+       Толщина — в долях кегля строки (ruleEm), а не в пикселях: при ужатии
+       волосяная линия должна остаться волосяной, а не стать жирнее набора.
+       Тень мягкая и тёмная — та же логика, что у подписи: линию отделяет
+       от светлого фона ореол, а не обводка. */
+    if (Array.isArray(anim.rules) && anim.rules.length && pass !== 'ghost') {
+      const th = Math.max(1.5, fontSize * (anim.ruleEm || 0.02) * _fit);
+      ctx.save();
+      ctx.fillStyle     = color || '#ffffff';
+      ctx.shadowColor   = 'rgba(0,0,0,0.55)';
+      ctx.shadowBlur    = Math.max(4, th * 3);
+      ctx.shadowOffsetY = th * 0.5;
+      for (const r of anim.rules) {
+        const a = r.alpha ?? 1;
+        if (!(a > 0.001)) continue;
+        const x0 = cx + Math.min(r.x0, r.x1) * _fit;
+        const x1 = cx + Math.max(r.x0, r.x1) * _fit;
+        const y  = cy + r.y * _fit;
+        if (!isFinite(x0) || !isFinite(x1) || !isFinite(y) || x1 - x0 < 1) continue;
+        ctx.globalAlpha = totalAlpha * Math.min(1, a);
+        ctx.fillRect(x0, Math.round(y - th / 2), x1 - x0, th);
+      }
+      ctx.restore();
+    }
+
     let spanIdx = 0;
 
     for (let wi = 0; wi < anim.words.length; wi++) {
@@ -1469,6 +1783,20 @@ const TextRenderer = (() => {
       ctx.translate((isGhost ? ghostCx : cx) + wData.x * k,
                     (isGhost ? ghostCy : cy) + wData.y * k);
       if (wRot) ctx.rotate(wRot);
+
+      /* Щель маски (см. title): слово видно только между clipEm[0] и
+         clipEm[1] — в долях его кегля от центра слова. Так слово выходит
+         из-за линейки, а не проявляется прозрачностью. Границы зажаты в
+         конечные числа: rect() с бесконечностью молча не строится, и clip()
+         по пустому пути стёр бы слово целиком. */
+      if (Array.isArray(wData.clipEm)) {
+        const c0 = Math.max(-1e5, Math.min(1e5, wData.clipEm[0] * wFontSize));
+        const c1 = Math.max(-1e5, Math.min(1e5, wData.clipEm[1] * wFontSize));
+        if (!(c1 > c0)) { ctx.restore(); continue; }
+        ctx.beginPath();
+        ctx.rect(-1e5, c0, 2e5, c1 - c0);
+        ctx.clip();
+      }
 
       // Предварительно меряем ширину при нужном размере
       const fontStyle = (spanForDraw.bold ? 'bold ' : '') + (spanForDraw.italic ? 'italic ' : '');
@@ -1513,8 +1841,18 @@ const TextRenderer = (() => {
       // Низ набора — по настоящим словам: перевод должен встать под
       // ТЕКСТОМ, а не под подложкой, которая уходит за край кадра.
       if (wData.ghost) continue;
-      const absY = cy + (wData.y ?? 0) + fontSize * (wData.scale ?? 1) * 0.5;
+      let absY = cy + (wData.y ?? 0) + fontSize * (wData.scale ?? 1) * 0.5;
+      // Под маской низ слова — это низ щели: пока герой титра выезжает из-за
+      // линейки, перевод не должен ехать вниз вслед за ним.
+      if (Array.isArray(wData.clipEm)) {
+        absY = Math.min(absY, cy + (wData.y ?? 0) + wData.clipEm[1] * fontSize * (wData.scale ?? 1));
+      }
       if (absY > wlBottom) wlBottom = absY;
+    }
+    /* Режим может знать низ набора лучше слов: у титра под героем идут
+       линейка и подписи, и перевод обязан встать под ними, а не на линейку. */
+    if (typeof anim.bottom === 'number' && isFinite(anim.bottom)) {
+      wlBottom = Math.max(wlBottom, cy + anim.bottom * _fit);
     }
     return wlBottom;
   }
@@ -1954,7 +2292,8 @@ const TextRenderer = (() => {
      а текст сам по себе — два слоя из разных клипов. Отдаём именно тот
      цвет, в который уходит градиент буквы, а не исходный цвет текста:
      исходный почти всегда белый, и подмешивать белое в фигуру бессмысленно. */
-  return { draw, getFadeAlpha, textShade: _deepShade,
+  return { draw, drawPlain, drawTranslation, getFadeAlpha, textShade: _deepShade,
+           drawColorWash,
            get lastFrameGuard() { return _diag; },
            get ghostJumps() { return _ghostJumps.slice(); } };
 })();
