@@ -77,6 +77,20 @@ const Album = (function () {
     });
   }
 
+  // Один трек в конец альбома (повтор по имени файла — пропускаем)
+  async function addTrack(f, lrc) {
+    if (!tracks.length) await reload();
+    if (tracks.some(t => t.name === f.name)) return null;
+    const rec = {
+      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+      order: tracks.length, name: f.name, type: f.type,
+      data: await f.arrayBuffer(), lrc: lrc || '', bgType: '', bgData: null,
+      duration: await probeDuration(f),
+    };
+    tracks.push(rec); await putRec(rec);
+    return rec;
+  }
+
   // Песни и тексты одним выбором: .lrc садится к песне с тем же именем
   async function addFiles(files) {
     const audio = [], lrc = [], imgs = [];
@@ -85,16 +99,7 @@ const Album = (function () {
       else if (/^image\//.test(f.type)) imgs.push(f);
       else audio.push(f);
     }
-    for (const f of audio) {
-      if (tracks.some(t => t.name === f.name)) continue;   // уже в альбоме
-      const rec = {
-        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
-        order: tracks.length, name: f.name, type: f.type,
-        data: await f.arrayBuffer(), lrc: '', bgType: '', bgData: null,
-        duration: await probeDuration(f),
-      };
-      tracks.push(rec); await putRec(rec);
-    }
+    for (const f of audio) await addTrack(f);
     for (const f of lrc.concat(imgs)) {
       const t = tracks.find(x => base(x.name) === base(f.name));
       if (!t) continue;
@@ -338,7 +343,8 @@ const Album = (function () {
 
   return {
     buildUI: buildUI, toggle: toggle, drawBackground: drawBackground, onAudio: onAudio,
-    addFiles: addFiles, reload: reload, loadTrack: loadTrack, exportAll: exportAll, chapters: chapters,
+    addFiles: addFiles, addTrack: addTrack, reload: reload, renderList: () => renderList(), loadTrack: loadTrack, exportAll: exportAll, chapters: chapters,
+    setName: n => { st.name = n; save(); },
     get tracks() { return tracks; }, get settings() { return st; },
   };
 })();

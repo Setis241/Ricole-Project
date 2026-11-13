@@ -398,9 +398,10 @@
 <script src="LRCParser.js?v=20260914e"></script>
 <script src="AudioAnalysis.js?v=20261113c"></script>
 <script src="AudioEngine.js?v=20261113b"></script>
-<script src="CardDeck.js?v=20261113d"></script>
+<script src="CardDeck.js?v=20261113f"></script>
 <script src="Visualizer.js?v=20261113c"></script>
-<script src="Album.js?v=20261113e"></script>
+<script src="Album.js?v=20261113f"></script>
+<script src="SongLibrary.js?v=20261113f"></script>
 <script src="physics-and-anim.js?v=20260914e"></script>
 <script src="BackgroundEngine.js?v=20260914e"></script>
 <script src="BackgroundManagerStorage.js?v=20260914e"></script>
@@ -436,6 +437,7 @@ document.addEventListener('DOMContentLoaded', () => {
   if (typeof CardDeck      !== 'undefined') CardDeck.buildUI();
   if (typeof Visualizer    !== 'undefined') Visualizer.buildUI();
   if (typeof Album         !== 'undefined') Album.buildUI();
+  if (typeof SongLibrary   !== 'undefined') SongLibrary.buildUI();
 
   // Section navigation
   const navBtns = document.querySelectorAll('.nav-btn');

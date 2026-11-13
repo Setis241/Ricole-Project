@@ -86,6 +86,12 @@ const CardDeck = (function () {
     loadImg();
     if (panelEl) fillPanel();
   }
+  // Карточка любого трека по имени файла (импорт из библиотеки Квантора)
+  function setMetaFor(name, patch) {
+    st.tracks[name] = Object.assign({}, st.tracks[name], patch);
+    save();
+    if (name === file) { loadImg(); cardKey = ''; }
+  }
   function setMeta(patch) {
     st.tracks[file] = Object.assign({}, st.tracks[file], patch);
     save();
@@ -627,7 +633,7 @@ const CardDeck = (function () {
 
   return {
     lead: lead, draw: draw, tickSfx: tickSfx, renderAudio: renderAudio, events: events,
-    setTrack: setTrack, setMeta: setMeta, setAlbum: setAlbum, meta: meta, ready: ready, buildUI: buildUI, toggle: toggle,
+    setTrack: setTrack, setMeta: setMeta, setMetaFor: setMetaFor, setAlbum: setAlbum, meta: meta, ready: ready, buildUI: buildUI, toggle: toggle,
     get settings() { return st; },
   };
 })();
