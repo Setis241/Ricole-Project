@@ -326,7 +326,7 @@ const ExportEngine = (() => {
   }
 
   /* ── Основной рендер ─────────────────────── */
-  async function doRender(preset, appState) {
+  async function doRender(preset, appState, opts) {
     const { lyrics, params } = appState;
     const audioBuffer = AudioEngine.buffer;
 
@@ -350,13 +350,14 @@ const ExportEngine = (() => {
     appInstance?.pauseLoop?.();
 
     try {
-      await _doRenderCore(preset, appState);
+      return await _doRenderCore(preset, appState, opts);
     } finally {
       appInstance?.resumeLoop?.();
     }
   }
 
-  async function _doRenderCore(preset, appState) {
+  // opts.keep — не скачивать, вернуть { blob, seconds } (пакетный экспорт альбома)
+  async function _doRenderCore(preset, appState, opts) {
     const { lyrics, params } = appState;
     const audioBuffer = AudioEngine.buffer;
 
@@ -689,6 +690,7 @@ const ExportEngine = (() => {
       // Decay text-driven camera ПОСЛЕ отрисовки фона (matches legacy timing)
       if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
+      if (typeof Album !== 'undefined') Album.drawBackground(offCtx, w, h, T, duration);
       if (_vizBg) offCtx.restore();
       if (_exportSceneApplied) offCtx.restore();
 
@@ -822,6 +824,7 @@ const ExportEngine = (() => {
     muxer.finalize();
 
     const blob = new Blob([target.buffer], { type: 'video/webm' });
+    if (opts && opts.keep) return { blob: blob, seconds: totalFrames / fps };
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
@@ -992,5 +995,15 @@ const ExportEngine = (() => {
     });
   }
 
-  return { showModal };
+  /* Пакетный рендер без модалки: Album гонит треки по очереди.
+     Оверлей прогресса — свой на каждый трек, подпись — label. */
+  async function renderBlob(presetKey, appState, label) {
+    const preset = PRESETS.find(p => p.key === presetKey) || PRESETS[0];
+    showOverlay(preset);
+    if (label) setProgress(0, label);
+    try { return await doRender(preset, appState, { keep: true }); }
+    finally { hideOverlay(); }
+  }
+
+  return { showModal, renderBlob, PRESETS };
 })();

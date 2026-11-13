@@ -50,6 +50,10 @@ const CardDeck = (function () {
   }
 
   let file = '';                 // текущий файл
+  // Место трека в альбоме: в середине считыватель не уезжает между треками —
+  // конец одного файла (выброс) и начало следующего (вставка) склеиваются в swap
+  let album = { first: true, last: true };
+  function setAlbum(a) { album = { first: a ? !!a.first : true, last: a ? !!a.last : true }; }
   let img = null, imgSrc = '';   // картинка карты
   let cardCache = null, cardKey = '';
 
@@ -335,7 +339,7 @@ const CardDeck = (function () {
 
     if (live && L > 0 && t < r0 + Tm.read) {
       metaA = 0;
-      if (t < -L + Tm.appear) { const p = E.appear((t + L) / Tm.appear); a = p; slide = (1 - p) * 14 * k; }
+      if (album.first && t < -L + Tm.appear) { const p = E.appear((t + L) / Tm.appear); a = p; slide = (1 - p) * 14 * k; }
       if (t < f0) { status = 'Пусто'; led = 'off'; }
       else if (t < i0) {
         const p = (t - f0) / Tm.fly;
@@ -356,7 +360,7 @@ const CardDeck = (function () {
       else if (t < g0) {
         card = keys([hi, { x: rest.x + 260 * k, y: up.y + 40 * k, s: .8, r: 14, o: 0 }], E.away((t - w0) / Tm.away));
         inSlot = false;
-      } else { const p = Math.min(1, (t - g0) / Tm.fade); a = 1 - p; slide = p * 14 * k; }
+      } else if (album.last) { const p = Math.min(1, (t - g0) / Tm.fade); a = 1 - p; slide = p * 14 * k; }
     } else card = rest;
     if (a <= 0.001) return;
 
@@ -623,7 +627,7 @@ const CardDeck = (function () {
 
   return {
     lead: lead, draw: draw, tickSfx: tickSfx, renderAudio: renderAudio, events: events,
-    setTrack: setTrack, setMeta: setMeta, ready: ready, buildUI: buildUI, toggle: toggle,
+    setTrack: setTrack, setMeta: setMeta, setAlbum: setAlbum, meta: meta, ready: ready, buildUI: buildUI, toggle: toggle,
     get settings() { return st; },
   };
 })();

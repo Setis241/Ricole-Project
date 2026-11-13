@@ -424,6 +424,8 @@ const App = (() => {
     // опять станет 1. Если нет — за ~150мс плавно затухнет до 0.
     if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
+    // Свой фон трека альбома (поверх фона редактора, внутри камеры)
+    if (typeof Album !== 'undefined') Album.drawBackground(ctx, cw, ch, AudioEngine.isPlaying ? tRaw : null, AudioEngine.duration);
     if (_vizBg) ctx.restore();
     if (_sceneApplied) ctx.restore();
 
@@ -571,10 +573,46 @@ const App = (() => {
     });
   }
 
+  /* Загрузка трека в редактор — из инпута и из альбома (Album.js).
+     save=false — не перезаписывать «последний трек» для восстановления. */
+  async function loadAudioFile(f, save) {
+    if (AudioEngine.isPlaying) document.getElementById('stopBtn')?.click();
+    setStatus('loading', 'Loading audio…');
+    const el = document.getElementById('audioDrop');
+    el.querySelector('.drop-name').textContent = f.name;
+    if (typeof CardDeck !== 'undefined') CardDeck.setTrack(f.name);
+    if (typeof Album !== 'undefined') Album.onAudio(f.name);
+    try {
+      await AudioEngine.loadBuffer(await f.arrayBuffer());
+      el.classList.add('loaded');
+      ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.disabled = false;
+      });
+      setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
+      // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
+      if (save !== false && typeof AudioStorage !== 'undefined') {
+        AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
+      }
+    } catch(err) {
+      setStatus('error', 'Decode error');
+      console.error(err);
+      throw err;
+    }
+  }
+
+  // Текст трека (пусто — без текста)
+  function setLyricsText(text) {
+    const el = document.getElementById('lyricsInput');
+    el.value = text || '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    parseLyrics();
+  }
+
   function parseLyrics() {
     const raw = document.getElementById('lyricsInput').value.trim();
-    if (!raw) return;
-    lyrics    = LRCParser.parse(raw);
+    // Пусто — значит текста нет (трек альбома без LRC), а не «оставить старый»
+    lyrics    = raw ? LRCParser.parse(raw) : [];
     activeIdx = -1;
     renderLyricList();
     // Передаём в BackgroundManager для UI выбора строк (timeline-scope)
@@ -693,31 +731,10 @@ const App = (() => {
     });
 
     // ── Audio
-    document.getElementById('audioFile').addEventListener('change', async e => {
+    document.getElementById('audioFile').addEventListener('change', e => {
       const f = e.target.files[0];
-      if (!f) return;
-      setStatus('loading', 'Loading audio…');
-      const el = document.getElementById('audioDrop');
-      el.querySelector('.drop-name').textContent = f.name;
-      if (typeof CardDeck !== 'undefined') CardDeck.setTrack(f.name);
-      try {
-        await AudioEngine.loadBuffer(await f.arrayBuffer());
-        el.classList.add('loaded');
-        ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
-          const b = document.getElementById(id);
-          if (b) b.disabled = false;
-        });
-        setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
-        // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
-        if (typeof AudioStorage !== 'undefined') {
-          AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
-        }
-      } catch(err) {
-        setStatus('error', 'Decode error');
-        console.error(err);
-      }
+      if (f) loadAudioFile(f).catch(() => { /* статус уже показан */ });
     });
-
     // ── Background image/video — quick-add к менеджеру фонов ──
     document.getElementById('bgFile').addEventListener('change', async e => {
       const files = Array.from(e.target.files || []);
@@ -1009,6 +1026,8 @@ const App = (() => {
   return {
     init: initUI,
     getState: () => ({ lyrics, params }),
+    loadAudioFile,
+    setLyricsText,
     pauseLoop,
     resumeLoop,
   };
