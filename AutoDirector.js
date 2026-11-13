@@ -2738,7 +2738,15 @@ const AutoDirector = (function() {
   function analyze() {
     const el = document.getElementById('lyricsInput');
     const rawLyrics = el ? el.value : '';
-    if (!rawLyrics.trim()) return { error: 'Лирика пустая — вставь текст с таймкодами.' };
+    // Без текста режиссировать нечего — видео ведёт визуализатор по битам трека
+    if (!rawLyrics.trim()) {
+      if (typeof Visualizer !== 'undefined') {
+        if (Visualizer.settings.preset === 'off') Visualizer.set({ preset: 'auto' });
+        return { error: 'Текста нет — видео ведёт визуализатор по музыке (◉ ВИЗУАЛ), режим «' +
+          (Visualizer.settings.preset === 'auto' ? 'авто' : Visualizer.settings.preset) + '».' };
+      }
+      return { error: 'Лирика пустая — вставь текст с таймкодами.' };
+    }
 
     const entries = LRCParser.parse(rawLyrics);
     if (!entries.length) return { error: 'Не удалось разобрать лирику.' };

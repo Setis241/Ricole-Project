@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <title>Ricole Project — Кинетическая типографика</title>
-<link rel="stylesheet" href="css/main.css?v=20260914e" />
+<link rel="stylesheet" href="css/main.css?v=20261113b" />
 </head>
 <body>
 
@@ -394,9 +394,13 @@
 
 </div>
 
-<script src="AudioStorage.js?v=20260914e"></script>
+<script src="AudioStorage.js?v=20261113a"></script>
 <script src="LRCParser.js?v=20260914e"></script>
-<script src="AudioEngine.js?v=20260914e"></script>
+<script src="AudioAnalysis.js?v=20261113c"></script>
+<script src="AudioEngine.js?v=20261113b"></script>
+<script src="CardDeck.js?v=20261113d"></script>
+<script src="Visualizer.js?v=20261113c"></script>
+<script src="Album.js?v=20261113e"></script>
 <script src="physics-and-anim.js?v=20260914e"></script>
 <script src="BackgroundEngine.js?v=20260914e"></script>
 <script src="BackgroundManagerStorage.js?v=20260914e"></script>
@@ -405,12 +409,12 @@
 <script src="BoxStyles.js?v=20260914e"></script>
 <script src="FxEditor.js?v=20260914e"></script>
 <script src="webm-muxer.js?v=20260914e"></script>
-<script src="ExportEngine.js?v=20260914e"></script>
+<script src="ExportEngine.js?v=20261113d"></script>
 <script src="PresetManager.js?v=20260914e"></script>
 <script src="FactoryPresets.js?v=20260914e"></script>
-<script src="AutoDirector.js?v=20260914e"></script>
+<script src="AutoDirector.js?v=20261113c"></script>
 <script src="LyricsEditor.js?v=20260914e"></script>
-<script src="App.js?v=20260914e"></script>
+<script src="App.js?v=20261113d"></script>
 <script>
   /* Версия берётся из ?v= самого тега, а не пишется руками: захардкоженная
      строка врала при каждом бампе и заставляла искать кэш там, где его нет. */
@@ -429,6 +433,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Готовые стили + авто-режиссёр (кнопки в шапке)
   if (typeof FactoryPresets !== 'undefined') FactoryPresets.buildUI();
   if (typeof AutoDirector  !== 'undefined') AutoDirector.buildUI();
+  if (typeof CardDeck      !== 'undefined') CardDeck.buildUI();
+  if (typeof Visualizer    !== 'undefined') Visualizer.buildUI();
+  if (typeof Album         !== 'undefined') Album.buildUI();
 
   // Section navigation
   const navBtns = document.querySelectorAll('.nav-btn');

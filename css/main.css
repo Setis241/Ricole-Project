@@ -2,7 +2,7 @@
    Ricole Project · main.css
    Modern Professional UI - Enhanced & Polished
 ═══════════════════════════════════════════════ */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600;700&family=Bebas+Neue&family=Montserrat:wght@700;900&family=Oswald:wght@600;700&family=Russo+One&family=Exo+2:wght@700;900&family=Play:wght@700&family=Comfortaa:wght@700&family=Jura:wght@700&family=Rubik:wght@700;900&family=Raleway:wght@800;900&display=swap&subset=cyrillic');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Rajdhani:wght@600;700&family=JetBrains+Mono:wght@400;600;700&family=Bebas+Neue&family=Montserrat:wght@700;900&family=Oswald:wght@600;700&family=Russo+One&family=Exo+2:wght@700;900&family=Play:wght@700&family=Comfortaa:wght@700&family=Jura:wght@700&family=Rubik:wght@700;900&family=Raleway:wght@800;900&display=swap&subset=cyrillic');
 
 :root {
   --bg:      #0a0a0a;

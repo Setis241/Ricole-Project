@@ -326,16 +326,14 @@ const ExportEngine = (() => {
   }
 
   /* ── Основной рендер ─────────────────────── */
-  async function doRender(preset, appState) {
+  async function doRender(preset, appState, opts) {
     const { lyrics, params } = appState;
     const audioBuffer = AudioEngine.buffer;
 
     if (!audioBuffer) {
       alert('Загрузи аудио-файл перед экспортом!'); return;
     }
-    if (!lyrics || lyrics.length === 0) {
-      alert('Нет текста. Введи LRC и нажми «Загрузить» перед экспортом!'); return;
-    }
+    // Текст не обязателен: без него видео ведут визуализатор и карта песни
     if (typeof VideoEncoder === 'undefined') {
       alert('Твой браузер не поддерживает WebCodecs.\nИспользуй Chrome или Edge 94+.'); return;
     }
@@ -352,20 +350,23 @@ const ExportEngine = (() => {
     appInstance?.pauseLoop?.();
 
     try {
-      await _doRenderCore(preset, appState);
+      return await _doRenderCore(preset, appState, opts);
     } finally {
       appInstance?.resumeLoop?.();
     }
   }
 
-  async function _doRenderCore(preset, appState) {
+  // opts.keep — не скачивать, вернуть { blob, seconds } (пакетный экспорт альбома)
+  async function _doRenderCore(preset, appState, opts) {
     const { lyrics, params } = appState;
     const audioBuffer = AudioEngine.buffer;
 
     const { w, h, fps, vbr, abr } = preset;
     const dt          = 1 / fps;
     const duration    = audioBuffer.duration;
-    const totalFrames = Math.ceil(duration * fps);
+    // Lead-in карты (CardDeck): кадры до нуля песни — карта вставляется, музыка ещё не идёт
+    const lead        = typeof CardDeck !== 'undefined' ? CardDeck.lead() : 0;
+    const totalFrames = Math.ceil((duration + lead) * fps);
     const sr          = audioBuffer.sampleRate;
     const nch         = Math.min(audioBuffer.numberOfChannels, 2);
 
@@ -403,6 +404,10 @@ const ExportEngine = (() => {
     setProgress(2, 'Анализ звука…');
     await tick();
     const freqFrames = precomputeFreqFrames(audioBuffer, fps);
+    // Та же карта событий, что и в превью (обычно уже посчитана при загрузке)
+    const hasEv = typeof AudioAnalysis !== 'undefined' && !!AudioAnalysis.get(audioBuffer);
+    if (typeof CardDeck !== 'undefined') await CardDeck.ready();
+    const silentFreq = new Uint8Array(freqFrames[0] ? freqFrames[0].length : 512);
 
     const offCanvas = document.createElement('canvas');
     offCanvas.width = w; offCanvas.height = h;
@@ -483,9 +488,11 @@ const ExportEngine = (() => {
         await tick();
       }
 
-      const t        = fi * dt;
-      const freqData = freqFrames[fi];
+      const T        = fi * dt - lead;          // время песни; < 0 — lead-in
+      const t        = Math.max(0, T);
+      const freqData = T < 0 ? silentFreq : freqFrames[Math.min(freqFrames.length - 1, Math.round(t * fps))];
       const bands    = localBands.analyze(freqData, sr, 1024, dt);
+      bands.ev = hasEv ? AudioAnalysis.at(audioBuffer, t) : null;
       // Тот же спектр, что и в превью, иначе венец в экспорте не поедет.
       if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 
@@ -657,6 +664,7 @@ const ExportEngine = (() => {
       const _exportSceneApplied = BackgroundEngine.applySceneTransform
         ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t)
         : false;
+      const _vizBg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(offCtx, w, h, bands.ev, 1, t);
 
       // ── ENDING: затухание контента ─────────────────────────
       const _exportEnding = BackgroundEngine.getEndingState
@@ -682,6 +690,8 @@ const ExportEngine = (() => {
       // Decay text-driven camera ПОСЛЕ отрисовки фона (matches legacy timing)
       if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
+      if (typeof Album !== 'undefined') Album.drawBackground(offCtx, w, h, T, duration);
+      if (_vizBg) offCtx.restore();
       if (_exportSceneApplied) offCtx.restore();
 
       // Тот же дуотон на фон, что и в превью (см. App.js) — иначе файл разойдётся с окном.
@@ -691,6 +701,7 @@ const ExportEngine = (() => {
       if (BackgroundEngine.applySceneFlash) {
         BackgroundEngine.applySceneFlash(offCtx, w, h, bands, t);
       }
+      if (typeof Visualizer !== 'undefined') Visualizer.drawSpectrum(offCtx, w, h, bands.ev, freqData);
 
       const currentLyric = _exportLyric;
 
@@ -706,6 +717,7 @@ const ExportEngine = (() => {
       const _exportFgApplied = BackgroundEngine.applySceneTransform
         ? BackgroundEngine.applySceneTransform(offCtx, w, h, bands, t, 0.28)
         : false;
+      const _vizFg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(offCtx, w, h, bands.ev, 0.28, t);
 
       BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
         // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
@@ -762,10 +774,16 @@ const ExportEngine = (() => {
         offCtx.globalAlpha = 1;
       });
 
+      if (_vizFg) offCtx.restore();
       if (_exportFgApplied) offCtx.restore();
 
       // Letterbox поверх всего
       BackgroundEngine.drawLetterboxLayer(offCtx, w, h, bands, dt);
+
+      if (typeof Visualizer !== 'undefined') Visualizer.post(offCtx, w, h, bands.ev, t);
+
+      // Карта песни в считывателе — как в превью
+      if (typeof CardDeck !== 'undefined') CardDeck.draw(offCtx, w, h, T, duration, freqData);
 
       // Закрываем content-alpha обёртку (ending fade)
       if (_exportContentSaved) offCtx.restore();
@@ -797,13 +815,16 @@ const ExportEngine = (() => {
 
     setProgress(90, 'Кодирование звука…');
     await tick();
-    await encodeAudio(audioBuffer, abr, muxer);
+    // Дорожка с lead-in и звуками карты (шорох, защёлка, писк, выброс)
+    const outAudio = typeof CardDeck !== 'undefined' ? await CardDeck.renderAudio(audioBuffer) : audioBuffer;
+    await encodeAudio(outAudio, abr, muxer);
 
     setProgress(97, 'Упаковка WebM…');
     await tick();
     muxer.finalize();
 
     const blob = new Blob([target.buffer], { type: 'video/webm' });
+    if (opts && opts.keep) return { blob: blob, seconds: totalFrames / fps };
     const url  = URL.createObjectURL(blob);
     const a    = document.createElement('a');
     a.href = url;
@@ -974,5 +995,15 @@ const ExportEngine = (() => {
     });
   }
 
-  return { showModal };
+  /* Пакетный рендер без модалки: Album гонит треки по очереди.
+     Оверлей прогресса — свой на каждый трек, подпись — label. */
+  async function renderBlob(presetKey, appState, label) {
+    const preset = PRESETS.find(p => p.key === presetKey) || PRESETS[0];
+    showOverlay(preset);
+    if (label) setProgress(0, label);
+    try { return await doRender(preset, appState, { keep: true }); }
+    finally { hideOverlay(); }
+  }
+
+  return { showModal, renderBlob, PRESETS };
 })();

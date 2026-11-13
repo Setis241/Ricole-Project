@@ -44,6 +44,7 @@ const App = (() => {
   // ── Loop state
   let rafId     = null;
   let lastT     = 0;
+  let _cardPrevT = -1e9;   // время прошлого кадра — для звуков карты
 
   /* Снимок последнего отрисованного кадра — для window.RicoleDebug().
      Объявлен на уровне модуля, а не внутри цикла: иначе функция-читалка
@@ -185,7 +186,13 @@ const App = (() => {
     // фигуры (см. _drawSpectrumCrown). bands — четыре числа, венцу их мало.
     if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 
-    const t = AudioEngine.getCurrentTime();
+    // tRaw < 0 — lead-in карты (CardDeck): песня ещё не пошла, сцена стоит на 0
+    const tRaw = AudioEngine.getCurrentTime();
+    const t = Math.max(0, tRaw);
+    if (typeof CardDeck !== 'undefined' && AudioEngine.isPlaying) CardDeck.tickSfx(_cardPrevT, tRaw, AudioEngine.duration);
+    _cardPrevT = AudioEngine.isPlaying ? tRaw : -1e9;
+    // Музыкальные события на момент t (доли, удары, части) — см. AudioAnalysis
+    bands.ev = typeof AudioAnalysis !== 'undefined' ? AudioAnalysis.at(AudioEngine.buffer, t) : null;
 
     // ── Лирика: найти активную строку
     if (lyrics.length > 0 && AudioEngine.isPlaying) {
@@ -383,6 +390,8 @@ const App = (() => {
     const _sceneApplied = BackgroundEngine.applySceneTransform
       ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t)
       : false;
+    // Камера визуализатора (биты/удары трека) — внутри сценической
+    const _vizBg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(ctx, cw, ch, bands.ev, 1, t);
 
     // ── ENDING SEQUENCE: получаем состояние затухания и громкости ──
     const endingState = BackgroundEngine.getEndingState
@@ -415,6 +424,9 @@ const App = (() => {
     // опять станет 1. Если нет — за ~150мс плавно затухнет до 0.
     if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
+    // Свой фон трека альбома (поверх фона редактора, внутри камеры)
+    if (typeof Album !== 'undefined') Album.drawBackground(ctx, cw, ch, AudioEngine.isPlaying ? tRaw : null, AudioEngine.duration);
+    if (_vizBg) ctx.restore();
     if (_sceneApplied) ctx.restore();
 
     // Фон живёт в том же дуотоне, что и строка. После restore — заливка
@@ -426,6 +438,8 @@ const App = (() => {
     if (BackgroundEngine.applySceneFlash) {
       BackgroundEngine.applySceneFlash(ctx, cw, ch, bands, t);
     }
+    // Спектр визуализатора — поверх фона, под текстом
+    if (typeof Visualizer !== 'undefined') Visualizer.drawSpectrum(ctx, cw, ch, bands.ev, freqData);
 
     // ── Overlays + Text в правильном z-порядке ──
     // drawOverlaysAll рендерит объекты в порядке массива,
@@ -451,6 +465,7 @@ const App = (() => {
     const _fgApplied = BackgroundEngine.applySceneTransform
       ? BackgroundEngine.applySceneTransform(ctx, cw, ch, bands, t, FOREGROUND_CAM)
       : false;
+    const _vizFg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(ctx, cw, ch, bands.ev, FOREGROUND_CAM, t);
 
     BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, (pass) => {
       // ── Text ──────────────────────────────────
@@ -495,10 +510,18 @@ const App = (() => {
 
     // Снимаем камеру переднего плана — леттербокс и ending рисуются
     // по краям кадра и двигаться вместе со сценой не должны.
+    if (_vizFg) ctx.restore();
     if (_fgApplied) ctx.restore();
 
     // ── Letterbox (поверх всего)
     BackgroundEngine.drawLetterboxLayer(ctx, cw, ch, bands, dt);
+
+    // ── Пост визуализатора: аберрация, глитч, вспышка, виньетка, зерно
+    if (typeof Visualizer !== 'undefined') Visualizer.post(ctx, cw, ch, bands.ev, t);
+
+    // ── Карта песни в считывателе (поверх кадра, гаснет вместе с ним)
+    if (typeof CardDeck !== 'undefined')
+      CardDeck.draw(ctx, cw, ch, AudioEngine.isPlaying ? tRaw : null, AudioEngine.duration, freqData);
 
     // Закрываем content-alpha обёртку, начатую перед фоном (для ending fade)
     if (_contentSaved) ctx.restore();
@@ -507,6 +530,9 @@ const App = (() => {
     if (endingState.active && BackgroundEngine.drawEnding) {
       BackgroundEngine.drawEnding(ctx, cw, ch, t);
     }
+
+    // ── Отладка битов (Shift+B), только в превью
+    if (typeof AudioAnalysis !== 'undefined') AudioAnalysis.drawDebug(ctx, cw, ch, AudioEngine.buffer, t);
 
     // ── VU & Spectrum
     updateMeters(bands, freqData, t);
@@ -547,10 +573,46 @@ const App = (() => {
     });
   }
 
+  /* Загрузка трека в редактор — из инпута и из альбома (Album.js).
+     save=false — не перезаписывать «последний трек» для восстановления. */
+  async function loadAudioFile(f, save) {
+    if (AudioEngine.isPlaying) document.getElementById('stopBtn')?.click();
+    setStatus('loading', 'Loading audio…');
+    const el = document.getElementById('audioDrop');
+    el.querySelector('.drop-name').textContent = f.name;
+    if (typeof CardDeck !== 'undefined') CardDeck.setTrack(f.name);
+    if (typeof Album !== 'undefined') Album.onAudio(f.name);
+    try {
+      await AudioEngine.loadBuffer(await f.arrayBuffer());
+      el.classList.add('loaded');
+      ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
+        const b = document.getElementById(id);
+        if (b) b.disabled = false;
+      });
+      setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
+      // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
+      if (save !== false && typeof AudioStorage !== 'undefined') {
+        AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
+      }
+    } catch(err) {
+      setStatus('error', 'Decode error');
+      console.error(err);
+      throw err;
+    }
+  }
+
+  // Текст трека (пусто — без текста)
+  function setLyricsText(text) {
+    const el = document.getElementById('lyricsInput');
+    el.value = text || '';
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    parseLyrics();
+  }
+
   function parseLyrics() {
     const raw = document.getElementById('lyricsInput').value.trim();
-    if (!raw) return;
-    lyrics    = LRCParser.parse(raw);
+    // Пусто — значит текста нет (трек альбома без LRC), а не «оставить старый»
+    lyrics    = raw ? LRCParser.parse(raw) : [];
     activeIdx = -1;
     renderLyricList();
     // Передаём в BackgroundManager для UI выбора строк (timeline-scope)
@@ -669,30 +731,10 @@ const App = (() => {
     });
 
     // ── Audio
-    document.getElementById('audioFile').addEventListener('change', async e => {
+    document.getElementById('audioFile').addEventListener('change', e => {
       const f = e.target.files[0];
-      if (!f) return;
-      setStatus('loading', 'Loading audio…');
-      const el = document.getElementById('audioDrop');
-      el.querySelector('.drop-name').textContent = f.name;
-      try {
-        await AudioEngine.loadBuffer(await f.arrayBuffer());
-        el.classList.add('loaded');
-        ['playBtn','stopBtn','recBtn','exportBtn'].forEach(id => {
-          const b = document.getElementById(id);
-          if (b) b.disabled = false;
-        });
-        setStatus('ready', `Ready — ${fmtTime(AudioEngine.duration)}`);
-        // Сохраняем аудио в IndexedDB для восстановления после перезагрузки
-        if (typeof AudioStorage !== 'undefined') {
-          AudioStorage.save(f).catch(err => console.warn('AudioStorage.save failed:', err));
-        }
-      } catch(err) {
-        setStatus('error', 'Decode error');
-        console.error(err);
-      }
+      if (f) loadAudioFile(f).catch(() => { /* статус уже показан */ });
     });
-
     // ── Background image/video — quick-add к менеджеру фонов ──
     document.getElementById('bgFile').addEventListener('change', async e => {
       const files = Array.from(e.target.files || []);
@@ -824,7 +866,7 @@ const App = (() => {
     // ── Transport
     bind('playBtn', 'click', () => {
       parseLyrics();
-      AudioEngine.play(0);
+      AudioEngine.play(typeof CardDeck !== 'undefined' ? -CardDeck.lead() : 0);
       BackgroundEngine.playVideo();
       if (typeof BackgroundManager !== 'undefined') { BackgroundManager.playVideos(); BackgroundManager.resetFxOverrides(); }
       BackgroundEngine.resetCamera();
@@ -883,6 +925,7 @@ const App = (() => {
         if (!file) return;
         const el = document.getElementById('audioDrop');
         setStatus('loading', 'Restoring audio…');
+        if (typeof CardDeck !== 'undefined') CardDeck.setTrack(file.name);
         try {
           await AudioEngine.loadBuffer(await file.arrayBuffer());
           if (el) {
@@ -983,6 +1026,8 @@ const App = (() => {
   return {
     init: initUI,
     getState: () => ({ lyrics, params }),
+    loadAudioFile,
+    setLyricsText,
     pauseLoop,
     resumeLoop,
   };
