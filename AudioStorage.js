@@ -27,19 +27,16 @@ const AudioStorage = (() => {
   }
 
   async function save(file) {
+    // Байты читаем ДО транзакции: IndexedDB закрывает её, как только
+    // поток уходит в await/FileReader, и put() после этого падает.
+    const data = await file.arrayBuffer();
     const db = await openDB();
     return new Promise((resolve, reject) => {
-      const tx    = db.transaction(STORE, 'readwrite');
-      const store = tx.objectStore(STORE);
+      const tx = db.transaction(STORE, 'readwrite');
       // Сохраняем {name, type, data} чтобы потом восстановить File
-      const reader = new FileReader();
-      reader.onload = () => {
-        store.put({ name: file.name, type: file.type, data: reader.result }, KEY);
-        tx.oncomplete = () => { db.close(); resolve(); };
-        tx.onerror    = e  => { db.close(); reject(e.target.error); };
-      };
-      reader.onerror = () => reject(new Error('FileReader error'));
-      reader.readAsArrayBuffer(file);
+      tx.objectStore(STORE).put({ name: file.name, type: file.type, data: data }, KEY);
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror    = e  => { db.close(); reject(e.target.error); };
     });
   }
 

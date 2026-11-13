@@ -403,6 +403,8 @@ const ExportEngine = (() => {
     setProgress(2, 'Анализ звука…');
     await tick();
     const freqFrames = precomputeFreqFrames(audioBuffer, fps);
+    // Та же карта событий, что и в превью (обычно уже посчитана при загрузке)
+    const hasEv = typeof AudioAnalysis !== 'undefined' && !!AudioAnalysis.get(audioBuffer);
 
     const offCanvas = document.createElement('canvas');
     offCanvas.width = w; offCanvas.height = h;
@@ -486,6 +488,7 @@ const ExportEngine = (() => {
       const t        = fi * dt;
       const freqData = freqFrames[fi];
       const bands    = localBands.analyze(freqData, sr, 1024, dt);
+      bands.ev = hasEv ? AudioAnalysis.at(audioBuffer, t) : null;
       // Тот же спектр, что и в превью, иначе венец в экспорте не поедет.
       if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 

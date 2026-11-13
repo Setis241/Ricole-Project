@@ -186,6 +186,8 @@ const App = (() => {
     if (BackgroundEngine.setSpectrum) BackgroundEngine.setSpectrum(freqData);
 
     const t = AudioEngine.getCurrentTime();
+    // Музыкальные события на момент t (доли, удары, части) — см. AudioAnalysis
+    bands.ev = typeof AudioAnalysis !== 'undefined' ? AudioAnalysis.at(AudioEngine.buffer, t) : null;
 
     // ── Лирика: найти активную строку
     if (lyrics.length > 0 && AudioEngine.isPlaying) {
@@ -507,6 +509,9 @@ const App = (() => {
     if (endingState.active && BackgroundEngine.drawEnding) {
       BackgroundEngine.drawEnding(ctx, cw, ch, t);
     }
+
+    // ── Отладка битов (Shift+B), только в превью
+    if (typeof AudioAnalysis !== 'undefined') AudioAnalysis.drawDebug(ctx, cw, ch, AudioEngine.buffer, t);
 
     // ── VU & Spectrum
     updateMeters(bands, freqData, t);

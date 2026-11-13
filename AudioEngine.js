@@ -22,6 +22,8 @@ const AudioEngine = (() => {
     gainNode.connect(analyser);
     analyser.connect(ctx.destination);
     buffer = await ctx.decodeAudioData(arrayBuffer);
+    // Карта битов/ударов считается сразу для любого нового трека
+    if (typeof AudioAnalysis !== 'undefined') AudioAnalysis.prepare(buffer);
     return buffer.duration;
   }
 
@@ -34,7 +36,9 @@ const AudioEngine = (() => {
     source.start(0, Math.max(0, offset));
     startTime = ctx.currentTime - offset;
     _isPlaying = true;
-    source.onended = () => { _isPlaying = false; };
+    // onended старого источника приходит ПОСЛЕ нового play() — гасим только свой
+    const own = source;
+    source.onended = () => { if (source === own) _isPlaying = false; };
     return source;
   }
 
