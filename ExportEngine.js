@@ -676,7 +676,9 @@ const ExportEngine = (() => {
         offCtx.globalAlpha = _exportEnding.contentAlpha;
       }
 
-      if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
+      if (typeof Album !== 'undefined' && Album.drawBackground(offCtx, w, h, T, duration)) {
+        // Песня из библиотеки: свой чистый фон
+      } else if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
         // Менеджер фонов: tick уже сделан выше до seek; здесь только рисуем активный entry.
         BackgroundManager.draw(offCtx, w, h, bands, t, dt);
         // Оверлеи затемнения/осветления из FX Editor работают поверх BackgroundManager
@@ -690,7 +692,6 @@ const ExportEngine = (() => {
       // Decay text-driven camera ПОСЛЕ отрисовки фона (matches legacy timing)
       if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
-      if (typeof Album !== 'undefined') Album.drawBackground(offCtx, w, h, T, duration);
       if (_vizBg) offCtx.restore();
       if (_exportSceneApplied) offCtx.restore();
 
@@ -719,7 +720,7 @@ const ExportEngine = (() => {
         : false;
       const _vizFg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(offCtx, w, h, bands.ev, 0.28, t);
 
-      BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
+      (typeof Album !== 'undefined' && Album.clean ? (c1, c2, c3, c4, c5, c6, c7, c8, cb) => cb() : BackgroundEngine.drawOverlaysAll)(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
         // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
         offCtx.globalAlpha = 1;
 

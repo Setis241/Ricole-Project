@@ -971,12 +971,19 @@ const PresetManager = (() => {
   let _autoTimer   = null;
   let _autoSaving  = false;   // guard: не запускать параллельный autosave
 
+  /* Песня из библиотеки (Album.openSong) открыта поверх проекта — её текст
+     и звук не должны затереть автосохранение проекта. */
+  let _autosaveBlocked = false;
+  function blockAutosave(v) { _autosaveBlocked = !!v; if (v) clearTimeout(_autoTimer); }
+
   function scheduleAutosave() {
+    if (_autosaveBlocked) return;
     clearTimeout(_autoTimer);
     _autoTimer = setTimeout(_doAutosave, 800); // увеличили с 500 → 800ms
   }
 
   async function _doAutosave() {
+    if (_autosaveBlocked) return;
     if (_autoSaving) return; // предыдущий ещё не завершился — пропускаем
     _autoSaving = true;
     try {
@@ -1374,6 +1381,7 @@ const PresetManager = (() => {
      Public API
   ══════════════════════════════════════════════ */
   return {
+    blockAutosave,
     buildUI:           buildUI,
     save:              save,
     load:              load,

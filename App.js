@@ -406,7 +406,9 @@ const App = (() => {
       ctx.globalAlpha = endingState.contentAlpha;
     }
 
-    if (BackgroundManager.hasEntries) {
+    if (typeof Album !== 'undefined' && Album.drawBackground(ctx, cw, ch, AudioEngine.isPlaying ? tRaw : null, AudioEngine.duration)) {
+      // Песня из библиотеки: свой чистый фон, сцена проекта не рисуется
+    } else if (BackgroundManager.hasEntries) {
       // Менеджер фонов: тикаем + рисуем активный entry с per-bg настройками
       BackgroundManager.tick(activeIdx >= 0 ? activeIdx : (lyrics.length ? 0 : -1), dt);
       BackgroundManager.draw(ctx, cw, ch, bands, t, dt);
@@ -424,8 +426,6 @@ const App = (() => {
     // опять станет 1. Если нет — за ~150мс плавно затухнет до 0.
     if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
-    // Свой фон трека альбома (поверх фона редактора, внутри камеры)
-    if (typeof Album !== 'undefined') Album.drawBackground(ctx, cw, ch, AudioEngine.isPlaying ? tRaw : null, AudioEngine.duration);
     if (_vizBg) ctx.restore();
     if (_sceneApplied) ctx.restore();
 
@@ -467,7 +467,8 @@ const App = (() => {
       : false;
     const _vizFg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(ctx, cw, ch, bands.ev, FOREGROUND_CAM, t);
 
-    BackgroundEngine.drawOverlaysAll(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, (pass) => {
+    // В режиме песни объектов проекта нет — только текст
+    (typeof Album !== 'undefined' && Album.clean ? (c1, c2, c3, c4, c5, c6, c7, c8, cb) => cb() : BackgroundEngine.drawOverlaysAll)(ctx, cw, ch, bands, t, dt, activeIdx, currentLyric, (pass) => {
       // ── Text ──────────────────────────────────
       if (_lyric && _animResult) {
         // 9-позиционная сетка: top/center/bottom × left/center/right
