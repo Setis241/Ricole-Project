@@ -32,7 +32,7 @@ const CardDeck = (function () {
   const LS = 'ricole.cardDeck';
   const DEF = {
     on: true,
-    corner: 'bl',        // bl | br | tl | tr | bc
+    corner: 'auto',      // auto (с текстом — верх-лево, без — низ-лево) | bl | br | tl | tr | bc
     size: 0.16,          // ширина карты от высоты кадра
     panel: 0.55,         // плотность подложки (0 — без неё)
     speed: 1.25,         // 1 — как в игре; больше — медленнее, читабельнее в видео
@@ -325,8 +325,12 @@ const CardDeck = (function () {
     const metaX = bay.x + bay.w + 20 * k, metaW = cw * 2.1;
     const PW = metaX + metaW + pad, PH = bay.y + bay.h + pad;
     const M = h * .04;
-    const ox = st.corner === 'br' || st.corner === 'tr' ? w - PW - M : st.corner === 'bc' ? (w - PW) / 2 : M;
-    const oy = st.corner === 'tl' || st.corner === 'tr' ? M : h - PH - M;
+    // «Авто»: строки лирики живут внизу/в центре — с текстом карта уходит наверх
+    const corner = st.corner === 'auto'
+      ? ((typeof App !== 'undefined' && App.getState && App.getState().lyrics.length) ? 'tl' : 'bl')
+      : st.corner;
+    const ox = corner === 'br' || corner === 'tr' ? w - PW - M : corner === 'bc' ? (w - PW) / 2 : M;
+    const oy = corner === 'tl' || corner === 'tr' ? M : h - PH - M;
 
     // ── Фаза
     const L = Tm.lead, live = T != null;
@@ -595,7 +599,7 @@ const CardDeck = (function () {
       `<button data-k="img" ${inp.replace('style="', 'style="cursor:pointer;')}></button><input type="file" accept="image/*" data-k="imgf" hidden>` +
       `<button data-k="imgx" ${inp.replace('style="', 'style="cursor:pointer;color:#888;')}>Без картинки — узор по названию</button>` +
       row('Плейлист (шапка)', `<input data-k="playlist" value="" ${inp}>`) +
-      row('Угол', `<select data-k="corner" ${inp}>${[['bl', 'низ-лево'], ['br', 'низ-право'], ['bc', 'низ-центр'], ['tl', 'верх-лево'], ['tr', 'верх-право']].map(o => `<option value="${o[0]}"${st.corner === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>`) +
+      row('Угол', `<select data-k="corner" ${inp}>${[['auto', 'авто (с текстом — наверху)'], ['bl', 'низ-лево'], ['br', 'низ-право'], ['bc', 'низ-центр'], ['tl', 'верх-лево'], ['tr', 'верх-право']].map(o => `<option value="${o[0]}"${st.corner === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>`) +
       row('Размер', `<input type="range" data-k="size" min="0.07" max="0.25" step="0.005" value="${st.size}">`) +
       row('Подложка', `<input type="range" data-k="panel" min="0" max="1" step="0.05" value="${st.panel}">`) +
       row('Скорость (1 — как в игре)', `<input type="range" data-k="speed" min="1" max="2" step="0.05" value="${st.speed}">`) +

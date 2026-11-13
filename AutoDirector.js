@@ -2914,10 +2914,32 @@ const AutoDirector = (function() {
     note.textContent = 'Применение перезапишет поле лирики: текст и таймкоды сохранятся.';
     body.appendChild(note);
 
+    /* Основной путь — спокойный режиссёр лирик-видео (LyricDirector):
+       текст на одном месте, одна подача, припев чуть крупнее, движение —
+       от визуализатора. Старая партитура осталась вторым пунктом. */
+    if (typeof LyricDirector !== 'undefined') {
+      const calm = document.createElement('button');
+      calm.textContent = '✅ ЛИРИК-ВИДЕО (СПОКОЙНО)';
+      calm.title = 'Текст на одном месте, плавное появление, припев чуть крупнее; фон и камера не дёргаются построчно. Твой шрифт, рамка и перевод остаются.';
+      calm.style.cssText = 'width:100%;background:#e8ff00;border:none;color:#000;' +
+        "font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;padding:9px;cursor:pointer;margin-bottom:6px;";
+      calm.addEventListener('click', function() {
+        const rep = LyricDirector.run();
+        calm.textContent = '✔ ГОТОВО: строк ' + rep.lines + ', припев ' + rep.chorus;
+        calm.style.background = '#7dffb0';
+        setTimeout(_closePanel, 1200);
+      });
+      body.appendChild(calm);
+      const calmNote = document.createElement('div');
+      calmNote.style.cssText = 'font-size:8px;color:#666;line-height:1.5;margin:0 0 10px;';
+      calmNote.textContent = 'Уберёт построчные теги и команды фона. Таймкоды, слова, метки частей, перевод и конец видео останутся.';
+      body.appendChild(calmNote);
+    }
+
     const apply = document.createElement('button');
-    apply.textContent = '✅ ПРИМЕНИТЬ ПАРТИТУРУ';
-    apply.style.cssText = 'width:100%;background:#e8ff00;border:none;color:#000;' +
-      "font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;padding:9px;cursor:pointer;";
+    apply.textContent = 'СТАРАЯ ПАРТИТУРА (ЭКСПЕРИМЕНТ)';
+    apply.style.cssText = 'width:100%;background:transparent;border:1px solid #444;color:#888;' +
+      "font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;padding:7px;cursor:pointer;";
     apply.addEventListener('click', function() {
       applyResult(_last);
       apply.textContent = '✔ ПРИМЕНЕНО';
@@ -2961,6 +2983,7 @@ const AutoDirector = (function() {
     buildScore:     buildScore,
     countSyllables: countSyllables,
     planCamera:     planCamera,
+    clearDirectorScenes: clearDirectorScenes,
     planStage:      planStage,
     planCharacter:  planCharacter,
     clearCharacterPlan: clearCharacterPlan,
