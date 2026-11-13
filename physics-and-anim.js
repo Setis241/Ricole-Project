@@ -405,6 +405,19 @@ const AnimModes = {
 
 
 
+  /* ЛИРИК-ВИДЕО — подача, принятая в лирик-видео на YouTube: строка
+     проявляется коротким подъёмом (0.45 с) и дальше СТОИТ. Ни тряски, ни
+     дрожания по басу: жизнь кадру даёт фон и камера визуализатора, а текст
+     обязан читаться. На долю — дыхание в полпроцента, глазом почти не
+     видно, но строка не мёртвая. */
+  lyric({ bands, elapsed, fontSize }) {
+    const k = Math.min(1, Math.max(0, elapsed || 0) / 0.45);
+    const e = 1 - Math.pow(1 - k, 3);
+    const beat = bands && bands.ev ? bands.ev.beat : 0;
+    const s = (0.985 + 0.015 * e) * (1 + beat * 0.005);
+    return { scaleX: s, scaleY: s, offsetX: 0, offsetY: (1 - e) * (fontSize || 96) * 0.18, rotation: 0, alpha: e };
+  },
+
   cinematic({ bands, t, params, springs }) {
     springs.scale.target = Math.min(0.92 + bands.overall * params.bassSens * 0.5, params.maxScale * 0.9);
     const camX = (Math.sin(t * 7.3) * 0.4 + Math.sin(t * 13.7) * 0.3) * (1 + bands.bass * 2);

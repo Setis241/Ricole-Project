@@ -5,8 +5,10 @@
    желанию) живёт в IndexedDB — песни можно докидывать по ходу,
    переживает перезагрузку.
 
-   Экспорт альбома — по файлу на трек (так браузер не держит час
-   видео в памяти): каждый файл начинается со вставки своей карты и
+   Экспорт альбома — ОДИН файл: поток пишется прямо на диск в выбранную
+   папку (ExportEngine.openSink), память от длины не зависит. Запасной
+   режим (без папки или галка «по файлу на трек») — файл на трек:
+   каждый начинается со вставки своей карты и
    кончается её выбросом, поэтому на стыке получается тот же swap,
    что в радио игры (CardDeck.setAlbum: в середине считыватель не
    уезжает). Рядом пишутся:
@@ -133,49 +135,134 @@ const Album = (function () {
     });
   }
 
-  /* ── Текущий трек в редакторе: свой фон ────── */
-  let cur = null, curImg = null, curName = '';
-  function onAudio(name) {
-    // Песню загрузили не из альбома — свой фон трека снимаем
-    if (!cur || cur.name !== name) {
-      cur = null; curImg = null;
-      if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(null);
-    }
-    curName = name;
+  /* ── Картинка песни (одна на песню: фон кадра + карта) ──
+     Хранится по имени файла — та же песня в альбоме и в библиотеке. */
+  function artDb(mode, fn) {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('ricole_art', 1);
+      r.onupgradeneeded = e => e.target.result.createObjectStore('art');
+      r.onerror = e => rej(e.target.error);
+      r.onsuccess = e => {
+        const d = e.target.result, t = d.transaction('art', mode), q = fn(t.objectStore('art'));
+        let out; if (q) q.onsuccess = () => { out = q.result; };
+        t.oncomplete = () => { d.close(); res(out); };
+        t.onerror = ev => { d.close(); rej(ev.target.error); };
+      };
+    });
+  }
+  const getArt = name => artDb('readonly', s => s.get(name)).catch(() => null);
+  async function setArt(name, blob) {
+    await artDb('readwrite', s => blob ? s.put(blob, name) : s.delete(name));
+    // Карта — уменьшенная копия той же картинки
+    if (typeof CardDeck !== 'undefined') CardDeck.setMetaFor(name, { img: blob ? await thumb(blob) : '' });
+    if (cur && cur.name === name) { curImg = blob ? await toImage(blob) : null; }
+  }
+  function toImage(blob) {
+    const url = URL.createObjectURL(blob);
+    return new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = url; });
+  }
+  async function thumb(blob) {
+    const im = await toImage(blob); if (!im) return '';
+    const k = Math.min(1, 512 / Math.max(im.width, im.height));
+    const cv = document.createElement('canvas'); cv.width = Math.round(im.width * k); cv.height = Math.round(im.height * k);
+    cv.getContext('2d').drawImage(im, 0, 0, cv.width, cv.height);
+    return cv.toDataURL('image/jpeg', 0.85);
   }
 
-  async function loadTrack(i) {
+  /* ── Режим песни ───────────────────────────────
+     Песня из библиотеки/альбома открывается в ЧИСТОЙ сцене: свой фон
+     (картинка песни или тёмный градиент цвета её карты), визуализатор,
+     текст, карта. Фон и объекты твоего проекта не рисуются и не
+     трогаются: автосохранение на это время выключено, «↩ Мой проект»
+     возвращает всё как было (звук, текст, сцену). */
+  let cur = null, curImg = null, stash = null;
+
+  function blockAutosave(v) { if (typeof PresetManager !== 'undefined' && PresetManager.blockAutosave) PresetManager.blockAutosave(v); }
+
+  async function openSong(file, lrc, opts) {
+    opts = opts || {};
+    if (!cur) {
+      // Входим в режим песни — запоминаем текст своего проекта
+      stash = { lyrics: document.getElementById('lyricsInput').value };
+      blockAutosave(true);
+    }
+    cur = { name: file.name };          // до загрузки: onAudio увидит «свою» песню
+    await App.loadAudioFile(file, false);
+    App.setLyricsText(lrc || '');
+    let blob = await getArt(file.name);
+    if (!blob && opts.bg) blob = opts.bg;
+    curImg = blob ? await toImage(blob) : null;
+    if (blob && typeof CardDeck !== 'undefined' && !(CardDeck.settings.tracks[file.name] || {}).img)
+      CardDeck.setMetaFor(file.name, { img: await thumb(blob) });
+    if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(opts.album || null);
+    if (opts.play !== false) document.getElementById('playBtn')?.click();
+    if (typeof SongLibrary !== 'undefined' && SongLibrary.refresh) SongLibrary.refresh();
+  }
+
+  // Песню загрузили обычным способом (свой файл) — выходим из режима песни
+  function onAudio(name) {
+    if (cur && cur.name === name) return;
+    if (cur) leave(false);
+  }
+
+  function leave(restoreLyrics) {
+    cur = null; curImg = null;
+    if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(null);
+    if (stash && restoreLyrics !== false) App.setLyricsText(stash.lyrics);
+    stash = null;
+    blockAutosave(false);
+    if (typeof SongLibrary !== 'undefined' && SongLibrary.refresh) SongLibrary.refresh();
+  }
+
+  // ↩ Мой проект: последний свой трек (AudioStorage), свой текст, своя сцена
+  async function myProject() {
+    if (!cur) return;
+    const lyr = stash ? stash.lyrics : null;
+    if (AudioEngine.isPlaying) document.getElementById('stopBtn')?.click();
+    cur = null; curImg = null;
+    const f = typeof AudioStorage !== 'undefined' ? await AudioStorage.load().catch(() => null) : null;
+    if (f) await App.loadAudioFile(f, false);
+    if (lyr != null) App.setLyricsText(lyr);
+    stash = null;
+    if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(null);
+    blockAutosave(false);
+    if (typeof SongLibrary !== 'undefined' && SongLibrary.refresh) SongLibrary.refresh();
+  }
+
+  async function loadTrack(i, play) {
     const t = tracks[i];
     if (!t) return;
-    await App.loadAudioFile(fileOf(t), false);
-    cur = t; curImg = null;
-    if (t.bgData) {
-      const url = URL.createObjectURL(new Blob([t.bgData], { type: t.bgType || 'image/jpeg' }));
-      curImg = await new Promise(r => { const im = new Image(); im.onload = () => r(im); im.onerror = () => r(null); im.src = url; });
-    }
-    App.setLyricsText(t.lrc || '');
-    if (typeof CardDeck !== 'undefined') {
-      CardDeck.settings.playlist = st.name;
-      CardDeck.setMeta({ n: i + 1 });
-      CardDeck.setAlbum({ first: i === 0, last: i === tracks.length - 1 });
-    }
+    if (typeof CardDeck !== 'undefined') CardDeck.settings.playlist = st.name;
+    await openSong(fileOf(t), t.lrc, {
+      bg: t.bgData ? new Blob([t.bgData], { type: t.bgType || 'image/jpeg' }) : null,
+      album: { first: i === 0, last: i === tracks.length - 1 }, play: !!play,
+    });
+    if (typeof CardDeck !== 'undefined') CardDeck.setMeta({ n: i + 1 });
   }
 
-  /* Свой фон трека: кадр целиком, медленный наезд, на стыке треков —
-     через тёмное (файлы склеиваются, кадр соседа здесь недоступен). */
+  /* Фон песни: картинка целиком с медленным наездом или градиент цвета
+     карты. Возвращает true — фон нарисован, сцену проекта не рисовать.
+     На стыке треков альбома — через тёмное. */
   function drawBackground(ctx, w, h, T, dur) {
-    if (!curImg || !cur) return;
+    if (!cur) return false;
     const L = lead(), t = T == null ? 0 : T, D = dur || 1;
-    const z = 1.04 + 0.06 * Math.max(0, Math.min(1, (t + L) / (D + L)));
     let a = 1;
-    // Из тёмного в начале файла и в тёмное в конце
     if (T != null) a = Math.max(0, Math.min(1, (t + L) / 0.6, (D - t) / 0.6));
-    const s = Math.max(w / curImg.width, h / curImg.height) * z;
     ctx.save();
     ctx.fillStyle = '#000'; ctx.fillRect(0, 0, w, h);
     ctx.globalAlpha *= a;
-    ctx.drawImage(curImg, (w - curImg.width * s) / 2, (h - curImg.height * s) / 2, curImg.width * s, curImg.height * s);
+    if (curImg) {
+      const z = 1.04 + 0.06 * Math.max(0, Math.min(1, (t + L) / (D + L)));
+      const s = Math.max(w / curImg.width, h / curImg.height) * z;
+      ctx.drawImage(curImg, (w - curImg.width * s) / 2, (h - curImg.height * s) / 2, curImg.width * s, curImg.height * s);
+    } else {
+      const hue = typeof CardDeck !== 'undefined' ? CardDeck.meta().hue : 210;
+      const g = ctx.createRadialGradient(w * 0.7, h * 0.3, 0, w * 0.7, h * 0.3, Math.hypot(w, h) * 0.75);
+      g.addColorStop(0, `hsl(${hue} 45% 22%)`); g.addColorStop(1, `hsl(${(hue + 40) % 360} 50% 5%)`);
+      ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+    }
     ctx.restore();
+    return true;
   }
 
   /* ── Экспорт альбома ───────────────────────── */
@@ -205,10 +292,42 @@ const Album = (function () {
     }
     busy = true;
     const files = [], lengths = [];
+    const note = '\n\n# Главы для описания YouTube. Нужно минимум 3 главы по 10+ секунд, первая — 00:00.\n';
+    // Один цельный файл: поток пишется прямо на диск (нужна папка и Chrome)
+    if (dir && !st.split && typeof FileSystemWritableFileStream !== 'undefined') {
+      const out = safe(st.name) + '.webm';
+      let ws = null;
+      try {
+        ws = await (await dir.getFileHandle(out, { create: true })).createWritable();
+        const sink = ExportEngine.openSink(ws);
+        for (let i = 0; i < tracks.length; i++) {
+          status('Трек ' + (i + 1) + ' / ' + tracks.length + ': ' + titleOf(tracks[i]));
+          await loadTrack(i, false);
+          const r = await ExportEngine.renderInto(st.preset, App.getState(), sink, 'Трек ' + (i + 1) + ' / ' + tracks.length + ' — ' + titleOf(tracks[i]));
+          if (!r) throw new Error('экспорт не запустился (WebCodecs?)');
+          lengths.push(r.seconds);
+        }
+        status('Дописываю файл…');
+        ExportEngine.closeSink(sink);
+        await ws.close(); ws = null;
+        const ch = chapters(lengths);
+        await writeFile(dir, 'chapters.txt', ch.join('\n') + note);
+        status('Готово: ' + out + ' · ' + fmt(lengths.reduce((a, b) => a + b, 0)) + ' · главы — в chapters.txt');
+        return { files: [out], lengths: lengths, chapters: ch };
+      } catch (e) {
+        console.error('[Album] экспорт', e);
+        status('Ошибка: ' + (e.message || e));
+        if (ws) { try { await ws.abort(); } catch (e2) { /* уже закрыт */ } }
+        return;
+      } finally {
+        busy = false;
+        if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(null);
+      }
+    }
     try {
       for (let i = 0; i < tracks.length; i++) {
         status('Трек ' + (i + 1) + ' / ' + tracks.length + ': ' + titleOf(tracks[i]));
-        await loadTrack(i);
+        await loadTrack(i, false);
         const r = await ExportEngine.renderBlob(st.preset, App.getState(), 'Трек ' + (i + 1) + ' / ' + tracks.length + ' — ' + titleOf(tracks[i]));
         if (!r) throw new Error('экспорт не запустился (WebCodecs?)');
         const name = String(i + 1).padStart(2, '0') + ' - ' + safe(titleOf(tracks[i])) + '.webm';
@@ -217,8 +336,7 @@ const Album = (function () {
       }
       const out = safe(st.name) + '.webm';
       const ch = chapters(lengths);
-      await writeFile(dir, 'chapters.txt', ch.join('\n') + '\n\n' +
-        '# Главы для описания YouTube. Нужно минимум 3 главы по 10+ секунд, первая — 00:00.\n');
+      await writeFile(dir, 'chapters.txt', ch.join('\n') + note);
       await writeFile(dir, 'concat.txt', files.map(f => "file '" + f.replace(/'/g, "'\\''") + "'").join('\n') + '\n');
       // Видео склеивается как есть, звук перекодируется — так стыки Opus без щелчков
       const cmd = 'ffmpeg -y -f concat -safe 0 -i concat.txt -c:v copy -c:a libopus -b:a 192k "' + out + '"';
@@ -257,11 +375,10 @@ const Album = (function () {
           <span style="color:#666;">${fmt(t.duration || 0)}</span>
         </div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;">
-          <button ${sb} data-a="load" data-i="${i}" title="Открыть в редакторе: превью, карта, текст">▶ в редактор</button>
+          <button ${sb} data-a="play" data-i="${i}" title="Открыть и слушать">▶ слушать</button>
           <button ${sb} data-a="lrc" data-i="${i}">${t.lrc ? 'текст ✓' : '+ текст'}</button>
-          <button ${sb} data-a="bg" data-i="${i}">${t.bgData ? 'фон ✓' : '+ фон'}</button>
+          <button ${sb} data-a="bg" data-i="${i}" title="Картинка песни: фон кадра и карта">🖼 картинка</button>
           ${t.lrc ? `<button ${sb} data-a="nolrc" data-i="${i}" title="Убрать текст">− текст</button>` : ''}
-          ${t.bgData ? `<button ${sb} data-a="nobg" data-i="${i}" title="Убрать свой фон">− фон</button>` : ''}
           <span style="flex:1"></span>
           <button ${sb} data-a="up" data-i="${i}">▲</button><button ${sb} data-a="down" data-i="${i}">▼</button>
           <button ${sb} data-a="del" data-i="${i}" title="Убрать из альбома">✕</button>
@@ -284,9 +401,10 @@ const Album = (function () {
       `<div data-k="sum" style="color:#888;"></div>` +
       `<label style="display:flex;flex-direction:column;gap:4px;"><span style="color:#888;font-size:9px;letter-spacing:1px;">ГЛАВЫ (ПРИМЕРНО; ТОЧНЫЕ — В chapters.txt ПОСЛЕ ЭКСПОРТА)</span><textarea data-k="ch" rows="4" readonly ${inp}></textarea></label>` +
       `<label style="display:flex;flex-direction:column;gap:4px;"><span style="color:#888;font-size:9px;letter-spacing:1px;">КАЧЕСТВО</span><select data-k="preset" ${inp}>${presets.map(x => `<option value="${x.key}"${st.preset === x.key ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>` +
+      `<label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" data-k="split"${st.split ? ' checked' : ''}> По файлу на трек (+ склейка через ffmpeg)</label>` +
       `<button data-k="go" style="background:#e8ff00;color:#000;border:0;padding:8px;font:inherit;font-weight:700;letter-spacing:1px;cursor:pointer;">ЭКСПОРТ АЛЬБОМА</button>` +
       `<div data-k="st" style="color:#aaa;"></div>` +
-      `<div style="color:#555;font-size:10px;">Файл на трек + chapters.txt + join.bat (нужен ffmpeg). Chrome спросит папку; без неё — обычными загрузками.</div>`;
+      `<div style="color:#555;font-size:10px;">Один файл «название.webm» + chapters.txt в выбранную папку (Chrome спросит её). Без папки — по файлу на трек загрузками.</div>`;
     document.body.appendChild(p);
     panelEl = p;
     const $ = s => p.querySelector(s);
@@ -295,6 +413,7 @@ const Album = (function () {
     $('[data-k="x"]').onclick = toggle;
     $('[data-k="name"]').oninput = e => { st.name = e.target.value; save(); };
     $('[data-k="preset"]').onchange = e => { st.preset = e.target.value; save(); };
+    $('[data-k="split"]').onchange = e => { st.split = e.target.checked; save(); };
     $('[data-k="add"]').onclick = () => $('[data-k="files"]').click();
     $('[data-k="files"]').onchange = async e => {
       status('Добавляю…');
@@ -305,20 +424,19 @@ const Album = (function () {
     $('[data-k="one"]').onchange = async e => {
       const f = e.target.files[0], t = pickFor && pickFor.t; e.target.value = '';
       if (!f || !t) return;
-      if (pickFor.kind === 'lrc') t.lrc = await f.text();
-      else { t.bgType = f.type; t.bgData = await f.arrayBuffer(); }
-      await putRec(t); renderList();
+      if (pickFor.kind === 'lrc') { t.lrc = await f.text(); await putRec(t); }
+      else await setArt(t.name, f);
+      renderList();
     };
     $('[data-k="list"]').onclick = async e => {
       const b = e.target.closest('button[data-a]'); if (!b) return;
       const i = +b.dataset.i, t = tracks[i], a = b.dataset.a;
-      if (a === 'load') { status('Открываю…'); await loadTrack(i); status('В редакторе: ' + titleOf(t) + ' — карту правь в «▣ КАРТА»'); }
+      if (a === 'play') { status('Открываю…'); await loadTrack(i, true); status('Играет: ' + titleOf(t) + ' · ↩ Мой проект — вернуться к своему'); }
       else if (a === 'lrc' || a === 'bg') {
         pickFor = { t: t, kind: a };
         const one = $('[data-k="one"]'); one.accept = a === 'lrc' ? '.lrc,.txt' : 'image/*'; one.click();
       }
       else if (a === 'nolrc') { t.lrc = ''; await putRec(t); }
-      else if (a === 'nobg') { t.bgData = null; t.bgType = ''; await putRec(t); }
       else if (a === 'del') { tracks.splice(i, 1); await delRec(t.id); await renumber(); }
       else if (a === 'up' && i > 0) { tracks.splice(i - 1, 0, tracks.splice(i, 1)[0]); await renumber(); }
       else if (a === 'down' && i < tracks.length - 1) { tracks.splice(i + 1, 0, tracks.splice(i, 1)[0]); await renumber(); }
@@ -345,6 +463,8 @@ const Album = (function () {
     buildUI: buildUI, toggle: toggle, drawBackground: drawBackground, onAudio: onAudio,
     addFiles: addFiles, addTrack: addTrack, reload: reload, renderList: () => renderList(), loadTrack: loadTrack, exportAll: exportAll, chapters: chapters,
     setName: n => { st.name = n; save(); },
+    openSong: openSong, myProject: myProject, setArt: setArt, getArt: getArt,
+    get clean() { return !!cur; }, get current() { return cur ? cur.name : ''; },
     get tracks() { return tracks; }, get settings() { return st; },
   };
 })();

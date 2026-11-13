@@ -208,17 +208,19 @@ const ExportEngine = (() => {
   }
 
   /* ── Аудио-энкодер ───────────────────────── */
-  async function encodeAudio(audioBuffer, abr, muxer) {
+  // offUs — сдвиг всех меток (трек внутри альбома), forceCh — число каналов потока
+  async function encodeAudio(audioBuffer, abr, muxer, offUs, forceCh) {
+    offUs = offUs || 0;
     if (typeof AudioEncoder === 'undefined') {
       console.warn('AudioEncoder недоступен, аудио пропущено');
       return;
     }
     const sr  = audioBuffer.sampleRate;
-    const nch = Math.min(audioBuffer.numberOfChannels, 2);
+    const nch = forceCh || Math.min(audioBuffer.numberOfChannels, 2);
     const FRAME_SZ = 1024;
 
     const encoder = new AudioEncoder({
-      output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
+      output: (chunk, meta) => muxer.addAudioChunk(chunk, meta, chunk.timestamp + offUs),
       error:  e => console.error('AudioEncoder:', e),
     });
 
@@ -413,14 +415,36 @@ const ExportEngine = (() => {
     offCanvas.width = w; offCanvas.height = h;
     const offCtx = offCanvas.getContext('2d', { willReadFrequently: false });
 
+    /* opts.sink — общий поток альбома: один muxer пишет прямо в файл на диске,
+       трек за треком со сдвигом меток (offUs). Звук трека кодируется ДО
+       кадров: тогда muxer сразу сбрасывает кадры в файл, а не копит их в
+       памяти до звука — длина альбома памяти не стоит. */
+    const sink = opts && opts.sink;
     const { Muxer, ArrayBufferTarget } = window.WebMMuxer;
-    const target = new ArrayBufferTarget();
-    const muxer  = new Muxer({
+    const target = sink ? null : new ArrayBufferTarget();
+    if (sink && !sink.muxer) {
+      sink.sr = sr;
+      sink.muxer = new Muxer({
+        target: sink.target,
+        video: { codec: 'V_VP9', width: w, height: h, frameRate: fps },
+        audio: { codec: 'A_OPUS', sampleRate: sr, numberOfChannels: 2, bitrate: abr },
+        firstTimestampBehavior: 'permissive',
+      });
+    }
+    if (sink && sink.sr !== sr) throw new Error('частота звука трека ' + sr + ' ≠ ' + sink.sr + ' у альбома');
+    const muxer  = sink ? sink.muxer : new Muxer({
       target,
       video: { codec: 'V_VP9', width: w, height: h, frameRate: fps },
       audio: { codec: 'A_OPUS', sampleRate: sr, numberOfChannels: nch, bitrate: abr },
       firstTimestampBehavior: 'permissive',
     });
+    const offUs = sink ? sink.offUs : 0;
+    if (sink) {
+      setProgress(4, 'Звук трека…');
+      await tick();
+      const trackAudio = typeof CardDeck !== 'undefined' ? await CardDeck.renderAudio(audioBuffer) : audioBuffer;
+      await encodeAudio(trackAudio, abr, muxer, offUs, 2);
+    }
 
     // VP9 level выбирается по фактическому разрешению/fps согласно спеке:
     //   5.1 — 4K60 (3840×2160 @ 60fps)
@@ -433,7 +457,7 @@ const ExportEngine = (() => {
     else                              vp9Codec = 'vp09.00.31.08';
 
     const videoEncoder = new VideoEncoder({
-      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta, chunk.timestamp + offUs),
       error:  e => { console.error('VideoEncoder:', e); throw e; },
     });
     videoEncoder.configure({
@@ -676,7 +700,9 @@ const ExportEngine = (() => {
         offCtx.globalAlpha = _exportEnding.contentAlpha;
       }
 
-      if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
+      if (typeof Album !== 'undefined' && Album.drawBackground(offCtx, w, h, T, duration)) {
+        // Песня из библиотеки: свой чистый фон
+      } else if (typeof BackgroundManager !== 'undefined' && BackgroundManager.hasEntries) {
         // Менеджер фонов: tick уже сделан выше до seek; здесь только рисуем активный entry.
         BackgroundManager.draw(offCtx, w, h, bands, t, dt);
         // Оверлеи затемнения/осветления из FX Editor работают поверх BackgroundManager
@@ -690,7 +716,6 @@ const ExportEngine = (() => {
       // Decay text-driven camera ПОСЛЕ отрисовки фона (matches legacy timing)
       if (BackgroundEngine.tickTextDrivenCamera) BackgroundEngine.tickTextDrivenCamera(dt);
 
-      if (typeof Album !== 'undefined') Album.drawBackground(offCtx, w, h, T, duration);
       if (_vizBg) offCtx.restore();
       if (_exportSceneApplied) offCtx.restore();
 
@@ -719,7 +744,7 @@ const ExportEngine = (() => {
         : false;
       const _vizFg = typeof Visualizer !== 'undefined' && Visualizer.applyCamera(offCtx, w, h, bands.ev, 0.28, t);
 
-      BackgroundEngine.drawOverlaysAll(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
+      (typeof Album !== 'undefined' && Album.clean ? (c1, c2, c3, c4, c5, c6, c7, c8, cb) => cb() : BackgroundEngine.drawOverlaysAll)(offCtx, w, h, bands, t, dt, activeIdx, currentLyric, (pass) => {
         // КРИТИЧНО: Сбрасываем globalAlpha перед рендером текста
         offCtx.globalAlpha = 1;
 
@@ -812,6 +837,7 @@ const ExportEngine = (() => {
     await tick();
     await videoEncoder.flush();
     videoEncoder.close();
+    if (sink) return { seconds: totalFrames / fps };   // звук уже в потоке, файл закроет альбом
 
     setProgress(90, 'Кодирование звука…');
     await tick();
@@ -1005,5 +1031,23 @@ const ExportEngine = (() => {
     finally { hideOverlay(); }
   }
 
-  return { showModal, renderBlob, PRESETS };
+  /* Общий поток альбома: openSink(writable) → renderInto(…) на каждый трек
+     (sink.offUs сдвигается на длину трека) → closeSink → writable.close(). */
+  function openSink(writable) {
+    const { FileSystemWritableFileStreamTarget } = window.WebMMuxer;
+    return { target: new FileSystemWritableFileStreamTarget(writable, { chunkSize: 16 * 1024 * 1024 }), muxer: null, offUs: 0, sr: 0 };
+  }
+  async function renderInto(presetKey, appState, sink, label) {
+    const preset = PRESETS.find(p => p.key === presetKey) || PRESETS[0];
+    showOverlay(preset);
+    if (label) setProgress(0, label);
+    try {
+      const r = await doRender(preset, appState, { sink: sink });
+      if (r) sink.offUs += Math.round(r.seconds * 1_000_000);
+      return r;
+    } finally { hideOverlay(); }
+  }
+  function closeSink(sink) { if (sink.muxer) sink.muxer.finalize(); }
+
+  return { showModal, renderBlob, renderInto, openSink, closeSink, PRESETS };
 })();

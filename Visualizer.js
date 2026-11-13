@@ -57,13 +57,13 @@ const Visualizer = (function () {
       mods: [
         { target: 'zoom', source: 'kick', amount: 0.05, energy: 0.8 },
         { target: 'zoom', source: 'bass', amount: 0.015, energy: 0.5 },
-        { target: 'rot', source: 'beatAlt', amount: 0.006, energy: 0.8 },
+        // Наклон — плавно по такту, а не туда-сюда на каждую долю
+        { target: 'rot', source: 'barCos', amount: 0.004, energy: 0.6 },
         { target: 'x', source: 'barSin', amount: 0.005 },
-        { target: 'shake', source: 'downbeat', amount: 0.005, energy: 1 },
-        { target: 'flash', source: 'downbeat', amount: 0.08, energy: 1, pow: 2 },
-        { target: 'flash', source: 'sectionPulse', amount: 0.3 },
-        { target: 'chroma', source: 'onset', amount: 0.004, energy: 0.9 },
-        { target: 'glitch', source: 'sectionPulse', amount: 1, pow: 3 },
+        { target: 'flash', source: 'downbeat', amount: 0.05, energy: 1, pow: 2 },
+        { target: 'flash', source: 'sectionPulse', amount: 0.25 },
+        { target: 'chroma', source: 'onset', amount: 0.002, energy: 0.9 },
+        { target: 'glitch', source: 'sectionPulse', amount: 0.6, pow: 3 },
         { target: 'vignette', source: 'bass', amount: 0.15 },
         { target: 'spec', source: 'energy', amount: 0.6 },
       ],
@@ -86,11 +86,15 @@ const Visualizer = (function () {
     },
   };
 
-  // «Авто»: стиль по темпу и плотности ударов трека
+  /* «Авто»: стиль по темпу и плотности ударов трека. С текстом —
+     не выше «Драйва» и только на действительно плотных треках: строку
+     надо читать, а не ловить. «Тяжело» — только руками. */
   function pick(map) {
     if (st.preset !== 'auto') return PRESETS[st.preset] || null;
-    if (!map) return PRESETS.drive;
-    if (map.density > 4.5 && map.bpm >= 118) return PRESETS.heavy;
+    if (!map) return PRESETS.calm;
+    const lyr = typeof App !== 'undefined' && App.getState ? App.getState().lyrics.length > 0 : false;
+    if (lyr) return map.density > 4 && map.bpm >= 120 ? PRESETS.drive : PRESETS.calm;
+    if (map.density > 5.5 && map.bpm >= 125) return PRESETS.heavy;
     if (map.bpm >= 100 || map.density > 3) return PRESETS.drive;
     return PRESETS.calm;
   }
