@@ -33,7 +33,9 @@ const AudioEngine = (() => {
     source = ctx.createBufferSource();
     source.buffer = buffer;
     source.connect(gainNode || analyser);
-    source.start(0, Math.max(0, offset));
+    // offset < 0 — песня стартует через |offset| с (lead-in карты): время идёт
+    // от отрицательного к нулю, звук начинается ровно в 0
+    source.start(offset < 0 ? ctx.currentTime - offset : 0, Math.max(0, offset));
     startTime = ctx.currentTime - offset;
     _isPlaying = true;
     // onended старого источника приходит ПОСЛЕ нового play() — гасим только свой
@@ -95,6 +97,8 @@ const AudioEngine = (() => {
     get fftSize()    { return FFT_SIZE; },
     get duration()   { return buffer ? buffer.duration : 0; },
     get ctx()        { return ctx; },
+    // Вход общей цепи: звуки поверх песни (CardDeck) идут и в колонки, и в запись
+    get bus()        { return gainNode; },
     // ExportEngine использует сырой буфер для offline FFT
     get buffer()     { return buffer; },
   };

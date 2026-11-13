@@ -283,6 +283,20 @@ const AudioAnalysis = (function () {
     });
     const eMax = Math.max.apply(null, secEnergy) || 1;
 
+    // Энергия трека: громкость, усреднённая по ±3 с — «где поднимается».
+    // Плавная, без ступенек на границах частей; 1 = самый громкий участок.
+    const energy = new Float32Array(n), ew = Math.round(fps * 3);
+    {
+      let run = 0, lo = 0, hi = -1;
+      for (let i = 0; i < n; i++) {
+        while (hi < Math.min(n - 1, i + ew)) run += rms[++hi];
+        while (lo < i - ew) run -= rms[lo++];
+        energy[i] = run / (hi - lo + 1);
+      }
+      let mx = 0; for (let i = 0; i < n; i++) mx = Math.max(mx, energy[i]);
+      for (let i = 0; i < n; i++) energy[i] /= mx || 1;
+    }
+
     const bpm = beats.length > 8
       ? 60 * (beats.length - 1) / (beats[beats.length - 1] - beats[0])
       : 60 * fps / period;
@@ -295,6 +309,8 @@ const AudioAnalysis = (function () {
       onsets: onsets, kicks: kicks,
       beats: beats, downbeats: downbeats, beatPhase: phase,
       sections: Float32Array.from(secStarts),
+      energy: energy,
+      density: onsets.times.length / Math.max(1, buffer.duration),   // ударов в секунду
       sectionEnergy: Float32Array.from(secEnergy, e => e / eMax),
       ms: Math.round((typeof performance !== 'undefined' ? performance : Date).now() - t0),
       _out: {},
@@ -335,6 +351,7 @@ const AudioAnalysis = (function () {
        section sectionPhase      номер части, 0..1 внутри неё
        sectionPulse              импульс смены части (спад ~1 с)
        sectionEnergy             громкость части 0..1 (1 — самая громкая)
+       energy                    плавная энергия (±3 с), 0..1
        bpm                                                            */
   function query(map, t) {
     const o = map._out;
@@ -343,6 +360,7 @@ const AudioAnalysis = (function () {
     o.mid  = sample(map.mid,  map.fps, t);
     o.high = sample(map.high, map.fps, t);
     o.rms  = sample(map.rms,  map.fps, t);
+    o.energy = sample(map.energy, map.fps, t);
 
     let i = lastIdx(map.onsets.times, t);
     o.onset = i < 0 ? 0 : map.onsets.strength[i] * pulse(t - map.onsets.times[i], 0.15);
