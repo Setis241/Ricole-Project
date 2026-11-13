@@ -2918,18 +2918,21 @@ const AutoDirector = (function() {
        текст на одном месте, одна подача, припев чуть крупнее, движение —
        от визуализатора. Старая партитура осталась вторым пунктом. */
     if (typeof LyricDirector !== 'undefined') {
-      const calm = document.createElement('button');
-      calm.textContent = '✅ ЛИРИК-ВИДЕО (СПОКОЙНО)';
-      calm.title = 'Текст на одном месте, плавное появление, припев чуть крупнее; фон и камера не дёргаются построчно. Твой шрифт, рамка и перевод остаются.';
-      calm.style.cssText = 'width:100%;background:#e8ff00;border:none;color:#000;' +
-        "font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;padding:9px;cursor:pointer;margin-bottom:6px;";
-      calm.addEventListener('click', function() {
-        const rep = LyricDirector.run();
-        calm.textContent = '✔ ГОТОВО: строк ' + rep.lines + ', припев ' + rep.chorus;
-        calm.style.background = '#7dffb0';
-        setTimeout(_closePanel, 1200);
-      });
-      body.appendChild(calm);
+      const mk = function(label, title, mode, primary) {
+        const b = document.createElement('button');
+        b.textContent = label; b.title = title;
+        b.style.cssText = 'width:100%;border:' + (primary ? 'none' : '1px solid #e8ff00') + ';background:' + (primary ? '#e8ff00' : 'transparent') +
+          ';color:' + (primary ? '#000' : '#e8ff00') + ";font-family:'Space Mono',monospace;font-size:9px;letter-spacing:2px;padding:9px;cursor:pointer;margin-bottom:6px;";
+        b.addEventListener('click', function() {
+          const rep = LyricDirector.run({ mode: mode });
+          b.textContent = '✔ строк ' + rep.lines + ', припев ' + rep.chorus + ', частей ' + rep.sections;
+          b.style.background = '#7dffb0'; b.style.color = '#000';
+          setTimeout(_closePanel, 1400);
+        });
+        body.appendChild(b);
+      };
+      mk('✅ ЛИРИК-ВИДЕО — ЖИВО (ПО ЧАСТЯМ)', 'У каждой части песни свой характер: куплет спокойный, подводка разгоняется, припев бьёт и раскрывает фон, бридж темнее, на проигрыше выходит спектр. Внутри части ничего не дёргается. Метки [Куплет]/[Припев]/[Бридж] в лирике помогают.', 'live', true);
+      mk('ЛИРИК-ВИДЕО — СПОКОЙНО', 'Одна подача на всю песню, припев чуть крупнее, движение минимальное.', 'calm', false);
       const calmNote = document.createElement('div');
       calmNote.style.cssText = 'font-size:8px;color:#666;line-height:1.5;margin:0 0 10px;';
       calmNote.textContent = 'Уберёт построчные теги и команды фона. Таймкоды, слова, метки частей, перевод и конец видео останутся.';

@@ -418,6 +418,25 @@ const AnimModes = {
     return { scaleX: s, scaleY: s, offsetX: 0, offsetY: (1 - e) * (fontSize || 96) * 0.18, rotation: 0, alpha: e };
   },
 
+  /* Припев лирик-видео: строка входит ударом (масштаб 1.14 → 1 с
+     перелётом, 0.32 с), дальше стоит и дышит на сильную долю (до 3%). */
+  lyricpop({ bands, elapsed }) {
+    const e0 = Math.max(0, elapsed || 0);
+    const k = Math.min(1, e0 / 0.32), c = 1.70158;
+    const back = 1 + (c + 1) * Math.pow(k - 1, 3) + c * Math.pow(k - 1, 2);   // easeOutBack 0→1
+    const ev = bands && bands.ev;
+    const pulse = ev ? ev.downbeat * 0.03 + ev.beat * 0.008 : 0;
+    const s = (1.14 - 0.14 * back) * (1 + pulse);
+    return { scaleX: s, scaleY: s, offsetX: 0, offsetY: 0, rotation: 0, alpha: Math.min(1, e0 / 0.12) };
+  },
+
+  /* Бридж: строка медленно проявляется (0.9 с) с лёгким подъёмом, без пульса. */
+  lyricsoft({ elapsed, fontSize }) {
+    const k = Math.min(1, Math.max(0, elapsed || 0) / 0.9);
+    const e = k * k * (3 - 2 * k);
+    return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: (1 - e) * (fontSize || 96) * 0.1, rotation: 0, alpha: e };
+  },
+
   cinematic({ bands, t, params, springs }) {
     springs.scale.target = Math.min(0.92 + bands.overall * params.bassSens * 0.5, params.maxScale * 0.9);
     const camX = (Math.sin(t * 7.3) * 0.4 + Math.sin(t * 13.7) * 0.3) * (1 + bands.bass * 2);

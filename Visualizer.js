@@ -86,6 +86,134 @@ const Visualizer = (function () {
     },
   };
 
+  /* ── «Сюжет»: свой характер у каждой части песни ──────────
+     Таймлайн частей — LyricDirector.timeline() по меткам лирики (или по
+     структуре). Внутри части кадр ведёт себя ровно; на границе параметры
+     перетекают за 0.6 с, а вход в часть отмечен склейкой (enter):
+     вспышка, удар камеры, на припеве — короткий глитч. specA — видимость
+     спектра: он выходит там, где нет текста (вступление, проигрыш, конец). */
+  const STORY = {
+    intro: {
+      base: { vignette: 0.45, grain: 0.06, spec: 0.7, specA: 1 },
+      mods: [
+        { target: 'zoom', source: 'secPhase', amount: 0.05 },               // медленный наезд к началу песни
+        { target: 'zoom', source: 'bass', amount: 0.015 },
+        { target: 'x', source: 'barSin', amount: 0.004 },
+      ],
+      enter: { flash: 0, zoom: 0, glitch: 0 },
+    },
+    verse: {
+      base: { vignette: 0.38, grain: 0.05, spec: 0.5, specA: 0 },
+      mods: [
+        { target: 'zoom', source: 'bass', amount: 0.02, energy: 0.5 },
+        { target: 'x', source: 'barSin', amount: 0.004 },
+        { target: 'rot', source: 'barCos', amount: 0.002 },
+      ],
+      enter: { flash: 0.18, zoom: 0.025, glitch: 0 },
+    },
+    prechorus: {
+      base: { vignette: 0.42, grain: 0.06, spec: 0.6, specA: 0 },
+      mods: [
+        { target: 'zoom', source: 'secPhase', amount: 0.07, pow: 2 },        // разгон к припеву
+        { target: 'vignette', source: 'secPhase', amount: 0.2 },
+        { target: 'zoom', source: 'kick', amount: 0.015 },
+        { target: 'chroma', source: 'secPhase', amount: 0.0015, pow: 3 },
+      ],
+      enter: { flash: 0.15, zoom: 0.02, glitch: 0 },
+    },
+    chorus: {
+      base: { vignette: 0.3, grain: 0.05, spec: 0.8, specA: 0 },
+      mods: [
+        { target: 'zoom', source: 'kick', amount: 0.045, energy: 0.6 },
+        { target: 'zoom', source: 'bass', amount: 0.015 },
+        { target: 'flash', source: 'downbeat', amount: 0.06, pow: 2 },
+        { target: 'x', source: 'barSin', amount: 0.006 },
+        { target: 'rot', source: 'barCos', amount: 0.004 },
+        { target: 'chroma', source: 'kick', amount: 0.0025 },
+      ],
+      enter: { flash: 0.5, zoom: 0.08, glitch: 0.7 },
+    },
+    bridge: {
+      base: { vignette: 0.55, grain: 0.11, spec: 0.4, specA: 0 },
+      mods: [
+        { target: 'zoom', source: 'secPhase', amount: -0.03 },             // медленный отъезд
+        { target: 'rot', source: 'barSin', amount: 0.003 },
+        { target: 'zoom', source: 'bass', amount: 0.01 },
+      ],
+      enter: { flash: 0.12, zoom: -0.03, glitch: 0.25 },
+    },
+    instrumental: {
+      base: { vignette: 0.4, grain: 0.07, spec: 0.9, specA: 1 },
+      mods: [
+        { target: 'zoom', source: 'kick', amount: 0.06, energy: 0.8 },
+        { target: 'flash', source: 'downbeat', amount: 0.08, pow: 2 },
+        { target: 'rot', source: 'barCos', amount: 0.006 },
+        { target: 'x', source: 'barSin', amount: 0.008 },
+        { target: 'chroma', source: 'onset', amount: 0.003, energy: 1 },
+        { target: 'glitch', source: 'downbeat', amount: 0.25, pow: 4, gate: 0.75 },
+      ],
+      enter: { flash: 0.35, zoom: 0.06, glitch: 0.5 },
+    },
+    outro: {
+      base: { vignette: 0.5, grain: 0.07, spec: 0.6, specA: 1 },
+      mods: [
+        { target: 'zoom', source: 'secPhase', amount: -0.04 },
+        { target: 'zoom', source: 'bass', amount: 0.012 },
+        { target: 'vignette', source: 'secPhase', amount: 0.3 },             // кадр закрывается
+      ],
+      enter: { flash: 0.15, zoom: 0, glitch: 0 },
+    },
+  };
+
+  let tlKey = null, tl = null;
+  function storyLine() {
+    if (typeof LyricDirector === 'undefined' || typeof App === 'undefined' || !App.getState) return null;
+    const lyr = App.getState().lyrics, D = AudioEngine.duration || 0;
+    if (tlKey && tlKey[0] === lyr && tlKey[1] === D) return tl;
+    tlKey = [lyr, D];
+    tl = LyricDirector.timeline(lyr, D);
+    return tl;
+  }
+
+  const TMP = {};
+  function accum(pr, ev, out, secPhase, mul) {
+    for (const k in pr.base) out[k] += pr.base[k];
+    for (const m of pr.mods) {
+      if (m.gate != null && ev.energy < m.gate) continue;
+      let v = m.source === 'secPhase' ? secPhase : source(ev, m.source);
+      if (m.pow) v = Math.sign(v) * Math.pow(Math.abs(v), m.pow);
+      const e = m.energy || 0;
+      out[m.target] += m.amount * v * (1 - e + e * ev.energy) * (m.target === 'vignette' || m.target === 'grain' || m.target === 'spec' ? 1 : mul);
+    }
+  }
+
+  function resolveStory(ev) {
+    const line = storyLine();
+    if (!line || !line.length) return false;
+    let i = 0;
+    for (let k = 0; k < line.length; k++) if (line[k].t <= ev.t) i = k;
+    const s = line[i], prev = i > 0 ? line[i - 1] : null;
+    const len = Math.max(0.5, (s.end || s.t + 1) - s.t), dt = ev.t - s.t;
+    const mul = s.last ? 1.3 : 1;
+    accum(STORY[s.type] || STORY.verse, ev, P, Math.max(0, Math.min(1, dt / len)), mul);
+    // Перетекание из прошлой части за 0.6 с
+    const X = 0.6;
+    if (prev && dt < X) {
+      for (const k in P) TMP[k] = 0;
+      accum(STORY[prev.type] || STORY.verse, ev, TMP, 1, prev.last ? 1.3 : 1);
+      const a = Math.max(0, dt / X);
+      for (const k in P) P[k] = TMP[k] + (P[k] - TMP[k]) * a;
+    }
+    // Склейка на входе в часть
+    if (prev && dt >= 0) {
+      const en = (STORY[s.type] || STORY.verse).enter;
+      P.flash += en.flash * Math.exp(-dt / 0.3) * mul;
+      P.zoom += en.zoom * Math.exp(-dt / 0.45) * mul;
+      P.glitch += en.glitch * Math.exp(-dt / 0.2);
+    }
+    return true;
+  }
+
   /* «Авто»: стиль по темпу и плотности ударов трека. С текстом —
      не выше «Драйва» и только на действительно плотных треках: строку
      надо читать, а не ловить. «Тяжело» — только руками. */
@@ -99,7 +227,7 @@ const Visualizer = (function () {
     return PRESETS.calm;
   }
 
-  const P = { zoom: 0, rot: 0, x: 0, y: 0, shake: 0, flash: 0, chroma: 0, glitch: 0, vignette: 0, grain: 0, spec: 0 };
+  const P = { zoom: 0, rot: 0, x: 0, y: 0, shake: 0, flash: 0, chroma: 0, glitch: 0, vignette: 0, grain: 0, spec: 0, specA: 1 };
   let lastEv = null, lastT = -1;
 
   function source(ev, s) {
@@ -116,20 +244,27 @@ const Visualizer = (function () {
     if (ev === lastEv && ev && ev.t === lastT) return P;
     for (const k in P) P[k] = 0;
     lastEv = ev; lastT = ev ? ev.t : -1;
-    const map = typeof AudioAnalysis !== 'undefined' && AudioEngine.buffer ? AudioAnalysis.get(AudioEngine.buffer) : null;
-    const pr = st.preset === 'off' ? null : pick(map);
-    if (!pr || !ev) return P;
+    P.specA = 1;
+    if (st.preset === 'off' || !ev) return P;
     const A = st.amount;
-    for (const k in pr.base) P[k] = pr.base[k];
-    for (const m of pr.mods) {
-      if (m.gate != null && ev.energy < m.gate) continue;
-      let v = source(ev, m.source);
-      if (m.pow) v = Math.sign(v) * Math.pow(Math.abs(v), m.pow);
-      const e = m.energy || 0;
-      P[m.target] += m.amount * v * (1 - e + e * ev.energy);
+    if (st.preset === 'story') P.specA = 0;
+    if (!(st.preset === 'story' && resolveStory(ev))) {
+      const map = typeof AudioAnalysis !== 'undefined' && AudioEngine.buffer ? AudioAnalysis.get(AudioEngine.buffer) : null;
+      const pr = st.preset === 'story' ? PRESETS.calm : pick(map);
+      if (!pr) return P;
+      P.specA = 1;
+      for (const k in pr.base) P[k] = pr.base[k];
+      for (const m of pr.mods) {
+        if (m.gate != null && ev.energy < m.gate) continue;
+        let v = source(ev, m.source);
+        if (m.pow) v = Math.sign(v) * Math.pow(Math.abs(v), m.pow);
+        const e = m.energy || 0;
+        P[m.target] += m.amount * v * (1 - e + e * ev.energy);
+      }
     }
     // Сила касается движения; виньетка/зерно — оформление, их не раздуваем
     for (const k of ['zoom', 'rot', 'x', 'y', 'shake', 'flash', 'chroma', 'glitch']) P[k] *= A;
+    P.specA = Math.max(0, Math.min(1, P.specA));
     if (!st.grain) P.grain = 0;
     return P;
   }
@@ -162,22 +297,28 @@ const Visualizer = (function () {
     return m / 255;
   }
   function drawSpectrum(ctx, w, h, ev, freq) {
-    if (st.spectrum === 'none' || !freq || !freq.length) return;
+    // В «Сюжете» спектр выходит сам там, где нет текста (полосы, если стиль не выбран)
+    const style = st.spectrum !== 'none' ? st.spectrum : (st.preset === 'story' ? 'bars' : 'none');
+    if (style === 'none' || !freq || !freq.length) return;
     const p = resolve(ev);
+    // Спектр, выбранный руками, не пропадает и под текстом — только тише
+    const vis = st.spectrum !== 'none' ? Math.max(0.5, p.specA) : p.specA;
+    if (vis <= 0.01) return;
     const g = Math.max(0.2, p.spec || 0.6);
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = Math.min(1, vis);
     ctx.globalCompositeOperation = 'screen';
     ctx.fillStyle = 'rgba(255,255,255,0.55)';
     ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-    if (st.spectrum === 'bars') {
+    if (style === 'bars') {
       const W = w * 0.6, bw = W / (N * 2), x0 = (w - W) / 2, base = h * 0.96, Hm = h * 0.14 * g;
       for (let i = 0; i < N; i++) {
         const v = Math.pow(bandVal(freq, i), 1.6), bh = Math.max(2, v * Hm);
         ctx.fillRect(x0 + W / 2 + i * bw + 1, base - bh, bw - 2, bh);
         ctx.fillRect(x0 + W / 2 - (i + 1) * bw + 1, base - bh, bw - 2, bh);
       }
-    } else if (st.spectrum === 'ring') {
+    } else if (style === 'ring') {
       const cx = w / 2, cy = h / 2, R = h * 0.17 * (1 + (ev ? ev.bass : 0) * 0.08), Lm = h * 0.12 * g;
       ctx.lineWidth = Math.max(2, h * 0.004); ctx.lineCap = 'round';
       ctx.beginPath();
@@ -312,7 +453,7 @@ const Visualizer = (function () {
     p.style.cssText = "position:fixed;top:52px;right:16px;z-index:9999;width:280px;background:#0d0d0d;border:1px solid #333;padding:14px;font-family:'JetBrains Mono',monospace;font-size:11px;color:#ddd;box-shadow:0 12px 40px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:10px;";
     const inp = 'style="background:#161616;border:1px solid #333;color:#eee;padding:5px 6px;font:inherit;"';
     const row = (label, html) => `<label style="display:flex;flex-direction:column;gap:4px;"><span style="color:#888;letter-spacing:1px;text-transform:uppercase;font-size:9px;">${label}</span>${html}</label>`;
-    const opts = [['auto', 'Авто (по темпу трека)'], ['calm', PRESETS.calm.name], ['drive', PRESETS.drive.name], ['heavy', PRESETS.heavy.name], ['off', 'Выключен']];
+    const opts = [['story', 'Сюжет (по частям песни)'], ['auto', 'Авто (по темпу трека)'], ['calm', PRESETS.calm.name], ['drive', PRESETS.drive.name], ['heavy', PRESETS.heavy.name], ['off', 'Выключен']];
     p.innerHTML =
       `<div style="display:flex;justify-content:space-between;align-items:center;"><b style="color:#ff2d55;letter-spacing:2px;">◉ ВИЗУАЛИЗАТОР</b><button data-k="x" style="background:none;border:0;color:#888;cursor:pointer;font-size:14px;">✕</button></div>` +
       row('Режим', `<select data-k="preset" ${inp}>${opts.map(o => `<option value="${o[0]}"${st.preset === o[0] ? ' selected' : ''}>${o[1]}</option>`).join('')}</select>`) +
