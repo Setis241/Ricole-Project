@@ -5,8 +5,10 @@
    желанию) живёт в IndexedDB — песни можно докидывать по ходу,
    переживает перезагрузку.
 
-   Экспорт альбома — по файлу на трек (так браузер не держит час
-   видео в памяти): каждый файл начинается со вставки своей карты и
+   Экспорт альбома — ОДИН файл: поток пишется прямо на диск в выбранную
+   папку (ExportEngine.openSink), память от длины не зависит. Запасной
+   режим (без папки или галка «по файлу на трек») — файл на трек:
+   каждый начинается со вставки своей карты и
    кончается её выбросом, поэтому на стыке получается тот же swap,
    что в радио игры (CardDeck.setAlbum: в середине считыватель не
    уезжает). Рядом пишутся:
@@ -290,6 +292,38 @@ const Album = (function () {
     }
     busy = true;
     const files = [], lengths = [];
+    const note = '\n\n# Главы для описания YouTube. Нужно минимум 3 главы по 10+ секунд, первая — 00:00.\n';
+    // Один цельный файл: поток пишется прямо на диск (нужна папка и Chrome)
+    if (dir && !st.split && typeof FileSystemWritableFileStream !== 'undefined') {
+      const out = safe(st.name) + '.webm';
+      let ws = null;
+      try {
+        ws = await (await dir.getFileHandle(out, { create: true })).createWritable();
+        const sink = ExportEngine.openSink(ws);
+        for (let i = 0; i < tracks.length; i++) {
+          status('Трек ' + (i + 1) + ' / ' + tracks.length + ': ' + titleOf(tracks[i]));
+          await loadTrack(i, false);
+          const r = await ExportEngine.renderInto(st.preset, App.getState(), sink, 'Трек ' + (i + 1) + ' / ' + tracks.length + ' — ' + titleOf(tracks[i]));
+          if (!r) throw new Error('экспорт не запустился (WebCodecs?)');
+          lengths.push(r.seconds);
+        }
+        status('Дописываю файл…');
+        ExportEngine.closeSink(sink);
+        await ws.close(); ws = null;
+        const ch = chapters(lengths);
+        await writeFile(dir, 'chapters.txt', ch.join('\n') + note);
+        status('Готово: ' + out + ' · ' + fmt(lengths.reduce((a, b) => a + b, 0)) + ' · главы — в chapters.txt');
+        return { files: [out], lengths: lengths, chapters: ch };
+      } catch (e) {
+        console.error('[Album] экспорт', e);
+        status('Ошибка: ' + (e.message || e));
+        if (ws) { try { await ws.abort(); } catch (e2) { /* уже закрыт */ } }
+        return;
+      } finally {
+        busy = false;
+        if (typeof CardDeck !== 'undefined') CardDeck.setAlbum(null);
+      }
+    }
     try {
       for (let i = 0; i < tracks.length; i++) {
         status('Трек ' + (i + 1) + ' / ' + tracks.length + ': ' + titleOf(tracks[i]));
@@ -302,8 +336,7 @@ const Album = (function () {
       }
       const out = safe(st.name) + '.webm';
       const ch = chapters(lengths);
-      await writeFile(dir, 'chapters.txt', ch.join('\n') + '\n\n' +
-        '# Главы для описания YouTube. Нужно минимум 3 главы по 10+ секунд, первая — 00:00.\n');
+      await writeFile(dir, 'chapters.txt', ch.join('\n') + note);
       await writeFile(dir, 'concat.txt', files.map(f => "file '" + f.replace(/'/g, "'\\''") + "'").join('\n') + '\n');
       // Видео склеивается как есть, звук перекодируется — так стыки Opus без щелчков
       const cmd = 'ffmpeg -y -f concat -safe 0 -i concat.txt -c:v copy -c:a libopus -b:a 192k "' + out + '"';
@@ -368,9 +401,10 @@ const Album = (function () {
       `<div data-k="sum" style="color:#888;"></div>` +
       `<label style="display:flex;flex-direction:column;gap:4px;"><span style="color:#888;font-size:9px;letter-spacing:1px;">ГЛАВЫ (ПРИМЕРНО; ТОЧНЫЕ — В chapters.txt ПОСЛЕ ЭКСПОРТА)</span><textarea data-k="ch" rows="4" readonly ${inp}></textarea></label>` +
       `<label style="display:flex;flex-direction:column;gap:4px;"><span style="color:#888;font-size:9px;letter-spacing:1px;">КАЧЕСТВО</span><select data-k="preset" ${inp}>${presets.map(x => `<option value="${x.key}"${st.preset === x.key ? ' selected' : ''}>${esc(x.label)}</option>`).join('')}</select></label>` +
+      `<label style="display:flex;gap:8px;align-items:center;"><input type="checkbox" data-k="split"${st.split ? ' checked' : ''}> По файлу на трек (+ склейка через ffmpeg)</label>` +
       `<button data-k="go" style="background:#e8ff00;color:#000;border:0;padding:8px;font:inherit;font-weight:700;letter-spacing:1px;cursor:pointer;">ЭКСПОРТ АЛЬБОМА</button>` +
       `<div data-k="st" style="color:#aaa;"></div>` +
-      `<div style="color:#555;font-size:10px;">Файл на трек + chapters.txt + join.bat (нужен ffmpeg). Chrome спросит папку; без неё — обычными загрузками.</div>`;
+      `<div style="color:#555;font-size:10px;">Один файл «название.webm» + chapters.txt в выбранную папку (Chrome спросит её). Без папки — по файлу на трек загрузками.</div>`;
     document.body.appendChild(p);
     panelEl = p;
     const $ = s => p.querySelector(s);
@@ -379,6 +413,7 @@ const Album = (function () {
     $('[data-k="x"]').onclick = toggle;
     $('[data-k="name"]').oninput = e => { st.name = e.target.value; save(); };
     $('[data-k="preset"]').onchange = e => { st.preset = e.target.value; save(); };
+    $('[data-k="split"]').onchange = e => { st.split = e.target.checked; save(); };
     $('[data-k="add"]').onclick = () => $('[data-k="files"]').click();
     $('[data-k="files"]').onchange = async e => {
       status('Добавляю…');
