@@ -53,7 +53,7 @@ const LyricDirector = (function () {
   /* ── Части песни: таймлайн [{ t, type, last }] ──────────────
      Метки ([Куплет], [Предприпев], [Припев], [Бридж], [Проигрыш]…)
      главнее всего: часть длится до следующей метки. Меток нет —
-     структура AutoDirector. Сверху — длинные паузы без слов: это
+     detectParts: повторы строк + громкость трека. Сверху — длинные паузы без слов: это
      проигрыш, даже если метки нет (там текст пропадает, и кадр должен
      жить сам). Последний припев помечен last — он бьёт сильнее. */
   function typeOf(label) {
@@ -69,6 +69,118 @@ const LyricDirector = (function () {
 
   const GAP = 12, HOLD = 5;   // пауза, после которой начинается проигрыш; сколько держится последняя строка
 
+  /* ── Части БЕЗ разметки ──────────────────────────────────────
+     Два сигнала, оба есть без меток:
+       • повтор строк: припев — то, что возвращается. Строки сравниваются
+         по первым трём словам — «Fifty thousand volts, is that enough?» и
+         «Fifty thousand volts of company love» одна строка припева;
+       • громкость трека (AudioAnalysis.energy, ±3 с): из нескольких
+         повторяющихся групп припев — самая громкая.
+     Повторяющиеся строки идут блоками (подряд, допускается одна
+     «чужая» строка внутри). Блоки с общими строками — одна семья.
+     Семья с наибольшей громкостью × числом строк — припев; другая
+     повторяющаяся семья прямо перед припевом — подводка. Уникальный
+     блок после второго припева и перед последним — бридж (если там не громче
+     припева).
+     Повторов нет вовсе — припевом считаются громкие места (energy ≥ 0.8
+     на двух строках подряд). */
+  function keyOf(text) {
+    const w = String(text || '').toLowerCase().replace(/[^\p{L}\p{N}\s']/gu, ' ').split(/\s+/).filter(Boolean);
+    return w.length >= 4 ? w.slice(0, 3).join(' ') : w.join(' ');
+  }
+
+  function detectParts(sung, D) {
+    const n = sung.length;
+    if (!n) return [];
+    const buf = typeof AudioEngine !== 'undefined' ? AudioEngine.buffer : null;
+    const hasAudio = !!(buf && typeof AudioAnalysis !== 'undefined' && AudioAnalysis.get(buf));
+    const energyAt = (t0, t1) => {
+      if (!buf || typeof AudioAnalysis === 'undefined' || !AudioAnalysis.get(buf)) return 0.5;
+      let sum = 0, k = 0;
+      for (let t = t0; t < t1; t += 0.5) { const ev = AudioAnalysis.at(buf, t); if (ev) { sum += ev.energy; k++; } }
+      return k ? sum / k : 0.5;
+    };
+    const L = sung.map((e, i) => {
+      const end = i + 1 < n ? Math.min(sung[i + 1].time, e.time + 6) : Math.min(D || e.time + 4, e.time + 6);
+      return { t: e.time, end: end, key: keyOf(e.text), e: energyAt(e.time, Math.max(end, e.time + 0.5)) };
+    });
+    const count = {};
+    L.forEach(l => { if (l.key) count[l.key] = (count[l.key] || 0) + 1; });
+    L.forEach(l => { l.rep = l.key ? count[l.key] : 0; });
+
+    // Блоки повторяющихся строк
+    const blocks = [];
+    let cur = null;
+    for (let i = 0; i < n; i++) {
+      const hook = L[i].rep >= 2;
+      // одна неповторяющаяся строка между повторами — часть блока
+      const bridgeOne = !hook && cur && i + 1 < n && L[i + 1].rep >= 2 && L[i + 1].t - L[i].t < 8;
+      if (hook || bridgeOne) {
+        if (cur && L[i].t - L[i - 1].t < 12) cur.to = i;
+        else { cur = { from: i, to: i }; blocks.push(cur); }
+      } else cur = null;
+    }
+    const good = blocks.filter(b => b.to > b.from || L[b.from].rep >= 3);
+
+    // Семьи: блоки с общими строками
+    const fam = [];
+    good.forEach(b => {
+      b.keys = new Set(); for (let i = b.from; i <= b.to; i++) if (L[i].rep >= 2) b.keys.add(L[i].key);
+      let f = fam.find(F => [...b.keys].some(k => F.keys.has(k)));
+      if (!f) { f = { keys: new Set(), blocks: [] }; fam.push(f); }
+      b.keys.forEach(k => f.keys.add(k)); f.blocks.push(b);
+    });
+    fam.forEach(F => {
+      let sum = 0, k = 0;
+      F.blocks.forEach(b => { for (let i = b.from; i <= b.to; i++) { sum += L[i].e; k++; } });
+      F.energy = k ? sum / k : 0; F.lines = k;
+      F.score = F.energy * Math.sqrt(k) * (F.blocks.length >= 2 ? 1.3 : 1);
+    });
+    fam.sort((a, b) => b.score - a.score);
+
+    const type = new Array(n).fill('verse');
+    if (fam.length) {
+      const chorus = fam[0];
+      chorus.blocks.forEach(b => { for (let i = b.from; i <= b.to; i++) type[i] = 'chorus'; });
+      // Подводка: блок другой семьи, кончающийся прямо перед припевом
+      fam.slice(1).forEach(F => F.blocks.forEach(b => {
+        const next = b.to + 1;
+        if (next < n && type[next] === 'chorus' && L[next].t - L[b.to].t < 10 && F.energy <= chorus.energy + 0.05)
+          for (let i = b.from; i <= b.to; i++) type[i] = 'prechorus';
+      }));
+    } else {
+      // Повторов нет — громкие места
+      for (let i = 0; i + 1 < n; i++) if (L[i].e >= 0.8 && L[i + 1].e >= 0.8) { type[i] = 'chorus'; type[i + 1] = 'chorus'; }
+    }
+    // Бридж: уникальный тихий блок после второго припева и перед последним
+    const runs = [];
+    for (let i = 0; i < n; i++) {
+      if (!runs.length || runs[runs.length - 1].type !== type[i]) runs.push({ type: type[i], from: i, to: i });
+      else runs[runs.length - 1].to = i;
+    }
+    const chRuns = runs.filter(r => r.type === 'chorus');
+    if (chRuns.length >= 3) {
+      const chE = chRuns.reduce((a, r) => a + L[r.from].e, 0) / chRuns.length;
+      runs.forEach((r, k) => {
+        if (r.type !== 'verse' || r.from < chRuns[1].to || r.to > chRuns[chRuns.length - 1].from) return;
+        let uniq = true, e = 0;
+        for (let i = r.from; i <= r.to; i++) { if (L[i].rep > 1) uniq = false; e += L[i].e; }
+        e /= (r.to - r.from + 1);
+        // Без звука громкость неизвестна (везде 0.5) — хватает места в песне
+        // Место в песне (между последними припевами, свои строки) — главный признак;
+        // звук только отменяет бридж, если там заметно громче припева
+        if (uniq && (!hasAudio || e <= chE + 0.03)) for (let i = r.from; i <= r.to; i++) type[i] = 'bridge';
+      });
+    }
+    // Границы частей — по началам строк
+    const tl = [];
+    for (let i = 0; i < n; i++) {
+      if (i === 0 || type[i] !== type[i - 1] || (type[i] === 'chorus' && L[i].t - L[i - 1].t > 12))
+        tl.push({ t: L[i].t - 0.05, type: type[i] });
+    }
+    return tl;
+  }
+
   function timeline(entries, duration) {
     entries = (entries || []).filter(e => e && isFinite(e.time));
     const sung = entries.filter(e => e.text);
@@ -79,16 +191,8 @@ const LyricDirector = (function () {
       let cur = 'verse';
       entries.forEach(e => { if (e.section) { cur = typeOf(e.section); tl.push({ t: e.time, type: cur }); } });
       if (!tl.length || tl[0].t > sung[0].time) tl.unshift({ t: sung[0].time, type: 'verse' });
-    } else if (typeof AutoDirector !== 'undefined') {
-      try {
-        const buf = typeof AudioEngine !== 'undefined' ? AudioEngine.buffer : null;
-        const audio = buf ? AutoDirector.analyzeAudio(buf) : null;
-        const lyr = AutoDirector.analyzeLyrics(entries, D);
-        AutoDirector.buildStructure(audio, lyr).forEach(s => {
-          const first = s.lines.find(l => l.text) || s.lines[0];
-          if (first) tl.push({ t: first.time, type: s.type === 'break' ? 'instrumental' : (s.type || 'verse') });
-        });
-      } catch (e) { console.warn('[LyricDirector] структура не посчиталась', e); }
+    } else {
+      tl = detectParts(sung, D);
     }
     if (!tl.length) tl.push({ t: sung[0].time, type: 'verse' });
     // Вступление до первой строки и концовка после последней
